@@ -6,23 +6,23 @@ FROM ghcr.io/element-hq/synapse:${SYNAPSE_VERSION} AS runtime
 # The provider is separately maintained by matrix-org under Apache-2.0. Pin its released tag;
 # upgrades are exercised against every candidate Synapse release before an image is published.
 ARG S3_PROVIDER_VERSION=1.6.1
+ARG CONTROLPLANE_RELEASE=0.3.6
 USER root
-RUN pip3 install --no-cache-dir \
-    "https://github.com/matrix-org/synapse-s3-storage-provider/archive/refs/tags/v${S3_PROVIDER_VERSION}.tar.gz"
-
-# This is the only TeleCrypt code running inside Synapse. It is source-baked into the immutable
-# image rather than bind-mounted or installed during container startup.
-COPY --chown=991:991 tier_controller /modules/tier_controller
+RUN set -eux; \
+    wheel="telecrypt_tier_controller-${CONTROLPLANE_RELEASE}-py3-none-any.whl"; \
+    release_url="https://github.com/TeleCrypt-io/controlplane/releases/download/${CONTROLPLANE_RELEASE}"; \
+    curl --fail --location --silent --show-error --output "/tmp/${wheel}" "${release_url}/${wheel}"; \
+    curl --fail --location --silent --show-error --output "/tmp/${wheel}.sha256" "${release_url}/${wheel}.sha256"; \
+    cd /tmp; sha256sum --check "${wheel}.sha256"; \
+    pip3 install --no-cache-dir \
+      "https://github.com/matrix-org/synapse-s3-storage-provider/archive/refs/tags/v${S3_PROVIDER_VERSION}.tar.gz" \
+      "/tmp/${wheel}"; \
+    rm -f "/tmp/${wheel}" "/tmp/${wheel}.sha256"
 COPY --chown=991:991 LICENSE THIRD_PARTY_NOTICES.md /licenses/
-ENV PYTHONPATH=/modules
 USER 991:991
 
 FROM runtime AS test
-USER root
-RUN pip3 install --no-cache-dir pytest==9.0.2 pytest-asyncio==1.4.0
-COPY --chown=991:991 tests /tests
-USER 991:991
 RUN python -c "from tier_controller import TierController; import s3_storage_provider" && \
-    python -m pytest -q /tests
+    python -c "from synapse.module_api import ModuleApi"
 
 FROM runtime AS production
