@@ -101,15 +101,19 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Refuse to overwrite an immutable release tag
+      - id: existing
+        name: Detect an existing immutable release tag
         env:
           TAG: ${{ needs.discover.outputs.synapse_version }}-tc.${{ needs.discover.outputs.telecrypt_revision }}
         run: |
           if docker manifest inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
-            echo "refusing to overwrite existing image tag: $IMAGE:$TAG" >&2
-            exit 1
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "immutable image already published: $IMAGE:$TAG"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
       - id: push
+        if: steps.existing.outputs.exists != 'true'
         uses: docker/build-push-action@v7.2.0
         with:
           context: .
@@ -126,7 +130,8 @@ jobs:
             org.opencontainers.image.base.name=ghcr.io/element-hq/synapse
             org.opencontainers.image.base.version=v${{ needs.discover.outputs.synapse_version }}
             org.telecrypt.s3-provider.version=${{ env.S3_PROVIDER_VERSION }}
-      - uses: actions/attest-build-provenance@v3.0.0
+      - if: steps.existing.outputs.exists != 'true'
+        uses: actions/attest-build-provenance@v3.0.0
         with:
           subject-name: ghcr.io/telecrypt-io/telecrypt-synapse
           subject-digest: ${{ steps.push.outputs.digest }}
