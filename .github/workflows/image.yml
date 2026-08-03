@@ -38,6 +38,7 @@ jobs:
       synapse_version: ${{ steps.version.outputs.synapse_version }}
       telecrypt_revision: ${{ steps.version.outputs.telecrypt_revision }}
       controlplane_release: ${{ steps.version.outputs.controlplane_release }}
+      image_tag: ${{ steps.version.outputs.image_tag }}
       publish: ${{ steps.version.outputs.publish }}
     steps:
       - id: version
@@ -76,9 +77,15 @@ jobs:
           case "$controlplane_release" in
             *[!0-9.]*|*..*|.|"") echo "invalid controlplane release: $controlplane_release" >&2; exit 2 ;;
           esac
+          upstream_line="$(printf '%s\n' "$version" | awk -F. 'NF == 3 { print $1 "." $2 }')"
+          case "$upstream_line" in
+            *[!0-9.]*|*..*|.|"") echo "invalid upstream release line: $upstream_line" >&2; exit 2 ;;
+          esac
+          image_tag="${upstream_line}-tc${revision}"
           printf 'synapse_version=%s\n' "$version" >> "$GITHUB_OUTPUT"
           printf 'telecrypt_revision=%s\n' "$revision" >> "$GITHUB_OUTPUT"
           printf 'controlplane_release=%s\n' "$controlplane_release" >> "$GITHUB_OUTPUT"
+          printf 'image_tag=%s\n' "$image_tag" >> "$GITHUB_OUTPUT"
           printf 'publish=%s\n' "$publish" >> "$GITHUB_OUTPUT"
 
   test:
@@ -118,7 +125,7 @@ jobs:
       - id: existing
         name: Detect an existing immutable release tag
         env:
-          TAG: ${{ needs.discover.outputs.synapse_version }}-cp.${{ needs.discover.outputs.controlplane_release }}-s3.${{ env.S3_PROVIDER_VERSION }}-tc.${{ needs.discover.outputs.telecrypt_revision }}
+          TAG: ${{ needs.discover.outputs.image_tag }}
         run: |
           if docker manifest inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
@@ -133,7 +140,7 @@ jobs:
           context: .
           target: production
           push: true
-          tags: ghcr.io/telecrypt-io/telecrypt-synapse:${{ needs.discover.outputs.synapse_version }}-cp.${{ needs.discover.outputs.controlplane_release }}-s3.${{ env.S3_PROVIDER_VERSION }}-tc.${{ needs.discover.outputs.telecrypt_revision }}
+          tags: ghcr.io/telecrypt-io/telecrypt-synapse:${{ needs.discover.outputs.image_tag }}
           build-args: |
             SYNAPSE_VERSION=v${{ needs.discover.outputs.synapse_version }}
             S3_PROVIDER_VERSION=${{ env.S3_PROVIDER_VERSION }}
@@ -141,7 +148,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/TeleCrypt-io/telecrypt-synapse
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ needs.discover.outputs.synapse_version }}-cp.${{ needs.discover.outputs.controlplane_release }}-s3.${{ env.S3_PROVIDER_VERSION }}-tc.${{ needs.discover.outputs.telecrypt_revision }}
+            org.opencontainers.image.version=${{ needs.discover.outputs.image_tag }}
             org.opencontainers.image.base.name=ghcr.io/element-hq/synapse
             org.opencontainers.image.base.version=v${{ needs.discover.outputs.synapse_version }}
             org.telecrypt.s3-provider.version=${{ env.S3_PROVIDER_VERSION }}

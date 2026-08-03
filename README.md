@@ -16,19 +16,18 @@ unrestricted.
 
 ## Image versions
 
-An image tag has the form `<synapse-version>-cp.<controlplane-release>-s3.<provider-version>-tc.<revision>`,
-for example `1.155.0-cp.0.3.6-s3.1.6.1-tc.1`.
+An image tag has the form `<synapse-major.minor>-tc<revision>`, for example `1.155-tc1`.
 
-- `<synapse-version>` is the upstream Element Synapse release.
-- `cp.<controlplane-release>` and `s3.<provider-version>` are exact independently released components.
-- `tc.<revision>` identifies an immutable builder revision for that exact component tuple. It is
-  never overwritten.
+- `<synapse-major.minor>` identifies the upstream Element Synapse release line.
+- `tc<revision>` identifies an immutable TeleCrypt build for that line. It is never overwritten.
+
+The exact upstream patch version, Controlplane wheel release, and S3-provider release belong in
+the OCI labels, build provenance, and source-release record—not the deployment tag.
 
 Images are built only by this repository's GitHub Actions workflows. A scheduled workflow detects a
 new stable upstream Synapse release, builds it with pinned external releases, runs the smoke test,
-generates provenance, and publishes only a passing image. The policy unit suite belongs to the
-independently versioned module repository. It never deploys to TeleCrypt infrastructure. A failed
-candidate is not published.
+generates provenance, and publishes only a passing image. The policy unit suite belongs to
+Controlplane. It never deploys to TeleCrypt infrastructure. A failed candidate is not published.
 
 `server` is responsible only for selecting a tested exact image tag in a separately released
 configuration change. The Linux VM must never build or install Python packages at runtime.
