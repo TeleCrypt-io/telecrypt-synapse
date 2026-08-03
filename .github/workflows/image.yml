@@ -1,0 +1,133 @@
+name: build telecrypt-synapse
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      synapse_version:
+        description: Upstream Synapse version without the leading v
+        required: true
+        default: "1.155.0"
+      telecrypt_revision:
+        description: Immutable TeleCrypt revision for this upstream version
+        required: true
+        default: "1"
+      publish:
+        description: Publish after tests pass
+        required: true
+        type: boolean
+        default: false
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/telecrypt-io/telecrypt-synapse
+  S3_PROVIDER_VERSION: "1.6.1"
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      synapse_version: ${{ steps.version.outputs.synapse_version }}
+      telecrypt_revision: ${{ steps.version.outputs.telecrypt_revision }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - id: version
+        env:
+          INPUT_VERSION: ${{ inputs.synapse_version }}
+          INPUT_REVISION: ${{ inputs.telecrypt_revision }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$INPUT_VERSION"
+            revision="$INPUT_REVISION"
+            publish="$INPUT_PUBLISH"
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            version="1.155.0"
+            revision="1"
+            publish="false"
+          else
+            version="$(curl --fail --silent --show-error \
+              https://api.github.com/repos/element-hq/synapse/releases/latest | \
+              jq -r '.tag_name' | sed -E 's/^v//')"
+            revision="1"
+            publish="true"
+          fi
+          case "$version" in
+            *[!0-9.]*|*..*|.|"") echo "invalid upstream version: $version" >&2; exit 2 ;;
+          esac
+          case "$revision" in
+            *[!0-9]*|"") echo "invalid TeleCrypt revision: $revision" >&2; exit 2 ;;
+          esac
+          printf 'synapse_version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'telecrypt_revision=%s\n' "$revision" >> "$GITHUB_OUTPUT"
+          printf 'publish=%s\n' "$publish" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: discover
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v4.0.0
+      - name: Build and test exact candidate
+        uses: docker/build-push-action@v7.2.0
+        with:
+          context: .
+          target: test
+          push: false
+          build-args: |
+            SYNAPSE_VERSION=v${{ needs.discover.outputs.synapse_version }}
+            S3_PROVIDER_VERSION=${{ env.S3_PROVIDER_VERSION }}
+
+  publish:
+    if: needs.discover.outputs.publish == 'true'
+    needs: [discover, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v4.0.0
+      - uses: docker/login-action@v4.5.2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Refuse to overwrite an immutable release tag
+        env:
+          TAG: ${{ needs.discover.outputs.synapse_version }}-tc.${{ needs.discover.outputs.telecrypt_revision }}
+        run: |
+          if docker manifest inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
+            echo "refusing to overwrite existing image tag: $IMAGE:$TAG" >&2
+            exit 1
+          fi
+      - id: push
+        uses: docker/build-push-action@v7.2.0
+        with:
+          context: .
+          target: production
+          push: true
+          tags: ghcr.io/telecrypt-io/telecrypt-synapse:${{ needs.discover.outputs.synapse_version }}-tc.${{ needs.discover.outputs.telecrypt_revision }}
+          build-args: |
+            SYNAPSE_VERSION=v${{ needs.discover.outputs.synapse_version }}
+            S3_PROVIDER_VERSION=${{ env.S3_PROVIDER_VERSION }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/TeleCrypt-io/telecrypt-synapse
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.discover.outputs.synapse_version }}-tc.${{ needs.discover.outputs.telecrypt_revision }}
+            org.opencontainers.image.base.name=ghcr.io/element-hq/synapse
+            org.opencontainers.image.base.version=v${{ needs.discover.outputs.synapse_version }}
+            org.telecrypt.s3-provider.version=${{ env.S3_PROVIDER_VERSION }}
+      - uses: actions/attest-build-provenance@v3.0.0
+        with:
+          subject-name: ghcr.io/telecrypt-io/telecrypt-synapse
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
