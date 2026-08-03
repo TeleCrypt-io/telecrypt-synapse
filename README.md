@@ -17,7 +17,7 @@ unrestricted.
 ## Image versions
 
 An image tag has the form `<synapse-version>-cp.<controlplane-release>-s3.<provider-version>-tc.<revision>`,
-for example `1.155.0-cp.0.3.5-s3.1.6.1-tc.1`.
+for example `1.155.0-cp.0.3.6-s3.1.6.1-tc.1`.
 
 - `<synapse-version>` is the upstream Element Synapse release.
 - `cp.<controlplane-release>` and `s3.<provider-version>` are exact independently released components.

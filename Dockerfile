@@ -6,7 +6,7 @@ FROM ghcr.io/element-hq/synapse:${SYNAPSE_VERSION} AS runtime
 # The provider is separately maintained by matrix-org under Apache-2.0. Pin its released tag;
 # upgrades are exercised against every candidate Synapse release before an image is published.
 ARG S3_PROVIDER_VERSION=1.6.1
-ARG CONTROLPLANE_RELEASE=0.3.5
+ARG CONTROLPLANE_RELEASE=0.3.6
 USER root
 RUN set -eux; \
     wheel="telecrypt_tier_controller-${CONTROLPLANE_RELEASE}-py3-none-any.whl"; \
