@@ -6,5 +6,5 @@
 3. Use exact release versions only: no `latest`, floating tags, or mutable deployment references.
 4. Build and publish images only in GitHub Actions. Never build them locally or on a TeleCrypt VM.
 5. A published image is never an authorization to deploy. Deployment requires a separate immutable
-   `server` release and local Harness acceptance.
+   `server-state-*` release and local Harness acceptance.
 6. Never put credentials, buckets, endpoints that are not public, or production data in this repo.
