@@ -29,8 +29,9 @@ new stable upstream Synapse release, builds it with pinned external releases, ru
 generates provenance, and publishes only a passing image. The policy unit suite belongs to
 Controlplane. It never deploys to TeleCrypt infrastructure. A failed candidate is not published.
 
-`server` is responsible only for selecting a tested exact image tag in a separately released
-configuration change. The Linux VM must never build or install Python packages at runtime.
+`server_state` is responsible only for selecting a tested exact image tag in a separately released
+`server-state-*` configuration change. The Linux VM must never build or install Python packages at
+runtime.
 
 ## Components
 
@@ -47,9 +48,9 @@ S3 endpoint, bucket, or credentials. Those remain server-only secrets.
 
 An automatically published image is an available, tested artifact—not a deployment. To adopt one:
 
-1. create a reviewed immutable `server` release referencing its exact tag;
+1. create a reviewed immutable `server-state-*` release referencing its exact tag;
 2. verify the release through local Harness acceptance; and
-3. deploy that `server` release explicitly.
+3. deploy that `server_state` release explicitly.
 
 Never use `latest`, a floating Synapse tag, a bind-mounted Python module, or a runtime `pip install`.
 
