@@ -6,9 +6,10 @@ FROM ghcr.io/element-hq/synapse:${SYNAPSE_VERSION} AS runtime
 # The provider is separately maintained by matrix-org under Apache-2.0. Pin its released tag;
 # upgrades are exercised against every candidate Synapse release before an image is published.
 ARG S3_PROVIDER_VERSION=1.6.1
-ARG CONTROLPLANE_RELEASE=0.3.6
+ARG CONTROLPLANE_RELEASE
 USER root
 RUN set -eux; \
+    test -n "${CONTROLPLANE_RELEASE}" || { echo "CONTROLPLANE_RELEASE is required" >&2; exit 2; }; \
     wheel="telecrypt_tier_controller-${CONTROLPLANE_RELEASE}-py3-none-any.whl"; \
     release_url="https://github.com/TeleCrypt-io/controlplane/releases/download/${CONTROLPLANE_RELEASE}"; \
     curl --fail --location --silent --show-error --output "/tmp/${wheel}" "${release_url}/${wheel}"; \

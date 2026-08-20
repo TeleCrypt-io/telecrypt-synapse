@@ -22,7 +22,11 @@ An image tag has the form `<synapse-major.minor>-tc<revision>`, for example `1.1
 - `tc<revision>` identifies an immutable TeleCrypt build for that line. It is never overwritten.
 
 The exact upstream patch version, Controlplane wheel release, and S3-provider release belong in
-the OCI labels, build provenance, and source-release record—not the deployment tag.
+the OCI labels, build provenance, and source-release record—not the deployment tag. The workflow's
+single top-level `CONTROLPLANE_RELEASE` value is the source of truth for the tier-controller wheel;
+the Dockerfile has no fallback value and every workflow event must pass that release explicitly.
+Changing the release therefore requires a reviewed workflow change rather than a hidden Dockerfile
+default.
 
 Images are built only by this repository's GitHub Actions workflows. A scheduled workflow detects a
 new stable upstream Synapse release, builds it with pinned external releases, runs the smoke test,
