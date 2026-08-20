@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Build only in GitHub Actions. The server pulls an exact published tag; it never builds this image.
-ARG SYNAPSE_VERSION=v1.155.0
+ARG SYNAPSE_VERSION
 FROM ghcr.io/element-hq/synapse:${SYNAPSE_VERSION} AS runtime
 
 # The provider is separately maintained by matrix-org under Apache-2.0. Pin its released tag;
