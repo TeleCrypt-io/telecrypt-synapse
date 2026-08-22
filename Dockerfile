@@ -5,7 +5,7 @@ FROM ghcr.io/element-hq/synapse:${SYNAPSE_VERSION} AS runtime
 
 # The provider is separately maintained by matrix-org under Apache-2.0. Pin its released tag;
 # upgrades are exercised against every candidate Synapse release before an image is published.
-ARG S3_PROVIDER_VERSION=1.6.1
+ARG S3_PROVIDER_VERSION=1.7.0
 ARG CONTROLPLANE_RELEASE
 USER root
 RUN set -eux; \
