@@ -7,7 +7,7 @@ on:
       synapse_version:
         description: Upstream Synapse version without the leading v
         required: true
-        default: "1.155.0"
+        default: "1.158.0"
       telecrypt_revision:
         description: Immutable TeleCrypt revision for this upstream version
         required: true
@@ -25,10 +25,10 @@ permissions:
 
 env:
   IMAGE: ghcr.io/telecrypt-io/telecrypt-synapse
-  S3_PROVIDER_VERSION: "1.6.1"
+  S3_PROVIDER_VERSION: "1.7.0"
   # Sole source of the exact external tier-controller release for every event type. Dockerfile
   # deliberately has no default; changing this value requires a reviewed workflow change.
-  CONTROLPLANE_RELEASE: "0.3.20"
+  CONTROLPLANE_RELEASE: "0.3.21"
 
 jobs:
   discover:
@@ -58,7 +58,7 @@ jobs:
             revision="$INPUT_REVISION"
             publish="$INPUT_PUBLISH"
           elif [ "$EVENT_NAME" = "pull_request" ]; then
-            version="1.155.0"
+            version="1.158.0"
             revision="1"
             publish="false"
           else
