@@ -103,22 +103,21 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - id: existing
-        name: Detect an existing immutable release tag
+      - name: Reject an existing immutable release tag
         env:
           TAG: ${{ needs.versions.outputs.image_tag }}
         run: |
+          set -euo pipefail
           if inspection="$(docker manifest inspect "$IMAGE:$TAG" 2>&1)"; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "immutable image already published: $IMAGE:$TAG"
+            echo "immutable image already published: $IMAGE:$TAG" >&2
+            exit 1
           elif printf '%s\n' "$inspection" | grep -Eqi 'manifest unknown|no such manifest|not found'; then
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "immutable image is absent: $IMAGE:$TAG"
           else
             echo "cannot prove whether immutable image exists: $IMAGE:$TAG" >&2
             exit 1
           fi
       - id: push
-        if: steps.existing.outputs.exists != 'true'
         uses: docker/build-push-action@v7.2.0
         with:
           context: .
@@ -137,8 +136,7 @@ jobs:
             org.opencontainers.image.base.version=v${{ needs.versions.outputs.synapse_version }}
             org.telecrypt.s3-provider.version=${{ needs.versions.outputs.s3_provider_version }}
             org.telecrypt.controlplane.release=${{ needs.versions.outputs.controlplane_release }}
-      - if: steps.existing.outputs.exists != 'true'
-        uses: actions/attest-build-provenance@v3.0.0
+      - uses: actions/attest-build-provenance@v3.0.0
         with:
           subject-name: ghcr.io/telecrypt-io/telecrypt-synapse
           subject-digest: ${{ steps.push.outputs.digest }}
