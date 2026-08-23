@@ -16,22 +16,22 @@ unrestricted.
 
 ## Image versions
 
-An image tag has the form `<synapse-major.minor>-tc<revision>`, for example `1.155-tc1`.
+An image tag has the form `<synapse-major.minor>-tc<revision>`.
 
 - `<synapse-major.minor>` identifies the upstream Element Synapse release line.
 - `tc<revision>` identifies an immutable TeleCrypt build for that line. It is never overwritten.
 
-The exact upstream patch version, Controlplane wheel release, and S3-provider release belong in
-the OCI labels, build provenance, and source-release record—not the deployment tag. The workflow's
-single top-level `CONTROLPLANE_RELEASE` value is the source of truth for the tier-controller wheel;
-the Dockerfile has no fallback value and every workflow event must pass that release explicitly.
-Changing the release therefore requires a reviewed workflow change rather than a hidden Dockerfile
-default.
+The exact upstream patch version, TeleCrypt revision, Controlplane wheel release, and S3-provider
+release are recorded together in the checked-in `versions.env` file. The workflow strictly validates
+that file for every pull request and manual run, then passes its values to the Dockerfile and OCI
+labels. The Dockerfile has no version defaults, so changing a component requires a reviewed source
+change.
 
-Images are built only by this repository's GitHub Actions workflows. A scheduled workflow detects a
-new stable upstream Synapse release, builds it with pinned external releases, runs the smoke test,
-generates provenance, and publishes only a passing image. The policy unit suite belongs to
-Controlplane. It never deploys to TeleCrypt infrastructure. A failed candidate is not published.
+Images are built only by this repository's GitHub Actions workflows. Pull requests run the exact
+candidate smoke test; publication is allowed only from the matching annotated Git tag after that
+test passes. There is no scheduled publisher or automatic release discovery. The policy unit suite
+belongs to Controlplane. This workflow never deploys to TeleCrypt infrastructure, and a failed
+candidate is not published.
 
 `server_state` is responsible only for selecting a tested exact image tag in a separately released
 `server-state-*` configuration change. The Linux VM must never build or install Python packages at
@@ -40,7 +40,7 @@ runtime.
 ## Components
 
 - Base: `ghcr.io/element-hq/synapse:v<version>`.
-- Media provider: [`matrix-org/synapse-s3-storage-provider`](https://github.com/matrix-org/synapse-s3-storage-provider), Apache-2.0, pinned in the Dockerfile.
+- Media provider: [`matrix-org/synapse-s3-storage-provider`](https://github.com/matrix-org/synapse-s3-storage-provider), Apache-2.0, pinned in `versions.env`.
 - Policy: [`TeleCrypt-io/controlplane`](https://github.com/TeleCrypt-io/controlplane), installed as a
   `telecrypt_tier_controller` wheel from the exact public GitHub Release. Its accompanying
   `.sha256` release asset is verified during the image build.
@@ -50,7 +50,7 @@ S3 endpoint, bucket, or credentials. Those remain server-only secrets.
 
 ## Release and deployment boundary
 
-An automatically published image is an available, tested artifact—not a deployment. To adopt one:
+A published image is an available, tested artifact—not a deployment. To adopt one:
 
 1. create a reviewed immutable `server-state-*` release referencing its exact tag;
 2. verify the release through local Harness acceptance; and

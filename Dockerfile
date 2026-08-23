@@ -1,14 +1,17 @@
 # syntax=docker/dockerfile:1
 # Build only in GitHub Actions. The server pulls an exact published tag; it never builds this image.
-ARG SYNAPSE_VERSION=v1.158.0
-FROM ghcr.io/element-hq/synapse:${SYNAPSE_VERSION} AS runtime
+ARG SYNAPSE_VERSION
+FROM ghcr.io/element-hq/synapse:v${SYNAPSE_VERSION} AS runtime
 
 # The provider is separately maintained by matrix-org under Apache-2.0. Pin its released tag;
 # upgrades are exercised against every candidate Synapse release before an image is published.
-ARG S3_PROVIDER_VERSION=1.7.0
+ARG SYNAPSE_VERSION
+ARG S3_PROVIDER_VERSION
 ARG CONTROLPLANE_RELEASE
 USER root
 RUN set -eux; \
+    test -n "${SYNAPSE_VERSION}" || { echo "SYNAPSE_VERSION is required" >&2; exit 2; }; \
+    test -n "${S3_PROVIDER_VERSION}" || { echo "S3_PROVIDER_VERSION is required" >&2; exit 2; }; \
     test -n "${CONTROLPLANE_RELEASE}" || { echo "CONTROLPLANE_RELEASE is required" >&2; exit 2; }; \
     wheel="telecrypt_tier_controller-${CONTROLPLANE_RELEASE}-py3-none-any.whl"; \
     release_url="https://github.com/TeleCrypt-io/controlplane/releases/download/${CONTROLPLANE_RELEASE}"; \
