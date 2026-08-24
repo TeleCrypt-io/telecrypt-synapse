@@ -55,6 +55,8 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Remove temporary checkout credentials before strict Git checks
+        run: bash .github/clear_checkout_auth.sh
       - name: Assert the versions source is the workflow commit
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -152,6 +154,8 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Remove temporary checkout credentials before strict Git checks
+        run: bash .github/clear_checkout_auth.sh
       - name: Assert the tested source is the workflow commit
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -430,6 +434,8 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Remove temporary checkout credentials before strict Git checks
+        run: bash .github/clear_checkout_auth.sh
       - name: Verify and load the exact tested image without retagging
         env:
           ARCHIVE_CHECKSUM: ${{ runner.temp }}/telecrypt-synapse-image-artifact/telecrypt-synapse-${{ needs.versions.outputs.image_tag }}.tar.sha256
@@ -644,6 +650,8 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Remove temporary checkout credentials before strict Git checks
+        run: bash .github/clear_checkout_auth.sh
       - name: Assert the release source is the workflow commit
         env:
           EXPECTED_SHA: ${{ github.sha }}
