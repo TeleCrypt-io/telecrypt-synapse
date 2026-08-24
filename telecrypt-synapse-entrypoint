@@ -1,0 +1,301 @@
+#!/usr/local/bin/python
+"""Validate and prepare Synapse's fixed disposable staging mount."""
+
+from __future__ import annotations
+
+import os
+import stat
+import sys
+from typing import NoReturn
+from pathlib import Path
+
+
+STAGING_PATH = "/staging"
+TMP_PATH = f"{STAGING_PATH}/tmp"
+MEDIA_PATH = f"{STAGING_PATH}/media"
+MOUNTINFO_PATH = "/proc/self/mountinfo"
+EXPECTED_UID = 991
+EXPECTED_GID = 991
+EXPECTED_MODE = 0o700
+FREE_RESERVE_BYTES = 10 * 1024 * 1024 * 1024
+DISK_FILESYSTEMS = frozenset(
+    {
+        "btrfs",
+        "ext2",
+        "ext3",
+        "ext4",
+        "f2fs",
+        "jfs",
+        "reiserfs",
+        "ufs",
+        "xfs",
+        "zfs",
+    }
+)
+MEMORY_OR_PSEUDO_FILESYSTEMS = frozenset(
+    {
+        "autofs",
+        "binfmt_misc",
+        "cgroup",
+        "cgroup2",
+        "configfs",
+        "debugfs",
+        "devpts",
+        "devtmpfs",
+        "efivarfs",
+        "fusectl",
+        "hugetlbfs",
+        "mqueue",
+        "overlay",
+        "proc",
+        "pstore",
+        "ramfs",
+        "securityfs",
+        "squashfs",
+        "sysfs",
+        "tmpfs",
+        "tracefs",
+    }
+)
+
+
+def fail(message: str) -> NoReturn:
+    print(f"telecrypt-synapse-entrypoint: {message}", file=sys.stderr)
+    raise SystemExit(78)
+
+
+def _unescape_mountinfo(value: str) -> str:
+    return value.replace(r"\040", " ").replace(r"\011", "\t").replace(
+        r"\012", "\n"
+    ).replace(r"\134", "\\")
+
+
+def read_mountinfo(
+    path: str = MOUNTINFO_PATH, *, expected_mountpoint: str = STAGING_PATH
+) -> dict[str, object]:
+    """Return the one exact mount record for the fixed staging path."""
+
+    try:
+        lines = Path(path).read_text(encoding="ascii").splitlines()
+    except (OSError, UnicodeDecodeError):
+        fail("mount information is unavailable")
+
+    matches: list[dict[str, object]] = []
+    for line in lines:
+        parts = line.split(" - ", 1)
+        if len(parts) != 2:
+            fail("mount information is malformed")
+        pre, post = parts
+        pre_fields = pre.split()
+        post_fields = post.split()
+        if len(pre_fields) < 6 or len(post_fields) < 3:
+            fail("mount information is malformed")
+        record_mountpoint = _unescape_mountinfo(pre_fields[4])
+        if record_mountpoint != expected_mountpoint:
+            continue
+        matches.append(
+            {
+                "filesystem": post_fields[0],
+                "mount_options": frozenset(pre_fields[5].split(",")),
+                "super_options": frozenset(post_fields[2].split(",")),
+            }
+        )
+
+    if len(matches) != 1:
+        fail("/staging is not exactly one mounted filesystem")
+    return matches[0]
+
+
+def validate_mount(path: str = STAGING_PATH, mountinfo_path: str = MOUNTINFO_PATH) -> None:
+    record = read_mountinfo(mountinfo_path, expected_mountpoint=path)
+    filesystem = record["filesystem"]
+    if not isinstance(filesystem, str):
+        fail("staging filesystem identity is malformed")
+    if filesystem in MEMORY_OR_PSEUDO_FILESYSTEMS or filesystem not in DISK_FILESYSTEMS:
+        fail("/staging is not a reviewed disk-backed filesystem")
+    mount_options = record["mount_options"]
+    super_options = record["super_options"]
+    if not isinstance(mount_options, frozenset) or not isinstance(super_options, frozenset):
+        fail("staging mount options are malformed")
+    if "rw" not in mount_options or "ro" in mount_options or "ro" in super_options:
+        fail("/staging is not writable")
+
+
+def _directory_metadata(path: str, label: str, *, create: bool = False) -> os.stat_result:
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        if not create:
+            fail(f"{label} is missing")
+        try:
+            os.mkdir(path, EXPECTED_MODE)
+            metadata = os.lstat(path)
+        except OSError:
+            fail(f"{label} cannot be created")
+    except OSError:
+        fail(f"{label} is unavailable")
+
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        fail(f"{label} is not a directory")
+    if (
+        metadata.st_uid != EXPECTED_UID
+        or metadata.st_gid != EXPECTED_GID
+        or stat.S_IMODE(metadata.st_mode) != EXPECTED_MODE
+    ):
+        fail(f"{label} ownership or mode is unsafe")
+    if not os.access(path, os.W_OK | os.X_OK):
+        fail(f"{label} is not writable")
+    return metadata
+
+
+def _validate_runtime_identity() -> None:
+    if os.geteuid() != EXPECTED_UID or os.getegid() != EXPECTED_GID:
+        fail("entrypoint must run as uid/gid 991")
+
+
+def _open_directory(path: str, label: str) -> int:
+    _directory_metadata(path, label)
+    try:
+        fd = os.open(
+            path,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError:
+        fail(f"{label} cannot be opened safely")
+    metadata = os.fstat(fd)
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != EXPECTED_UID
+        or metadata.st_gid != EXPECTED_GID
+        or stat.S_IMODE(metadata.st_mode) != EXPECTED_MODE
+    ):
+        os.close(fd)
+        fail(f"{label} changed while being opened")
+    return fd
+
+
+def _remove_entry(parent_fd: int, name: str, device: int) -> None:
+    try:
+        metadata = os.lstat(name, dir_fd=parent_fd)
+    except OSError:
+        fail("staging contents cannot be inspected safely")
+    if stat.S_ISLNK(metadata.st_mode):
+        fail("staging contains a symlink")
+    if metadata.st_dev != device:
+        fail("staging contains a nested mount")
+    if stat.S_ISDIR(metadata.st_mode):
+        try:
+            child_fd = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_fd,
+            )
+        except OSError:
+            fail("staging directory cannot be opened safely")
+        try:
+            child_metadata = os.fstat(child_fd)
+            if child_metadata.st_dev != device:
+                fail("staging contains a nested mount")
+            try:
+                children = os.listdir(child_fd)
+            except OSError:
+                fail("staging directory cannot be listed safely")
+            for child in children:
+                _remove_entry(child_fd, child, device)
+        finally:
+            os.close(child_fd)
+        try:
+            os.rmdir(name, dir_fd=parent_fd)
+        except OSError:
+            fail("staging directory cannot be removed")
+        return
+    try:
+        os.unlink(name, dir_fd=parent_fd)
+    except OSError:
+        fail("staging file cannot be removed")
+
+
+def clear_children(path: str) -> None:
+    fd = _open_directory(path, "staging child")
+    try:
+        device = os.fstat(fd).st_dev
+        try:
+            children = os.listdir(fd)
+        except OSError:
+            fail("staging directory cannot be listed safely")
+        for child in children:
+            _remove_entry(fd, child, device)
+    finally:
+        os.close(fd)
+
+
+def _probe_write(path: str) -> None:
+    fd = _open_directory(path, "staging child")
+    name = f".telecrypt-entrypoint-{os.getpid()}"
+    try:
+        try:
+            probe_fd = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=fd,
+            )
+        except OSError:
+            fail("staging child is not writable")
+        else:
+            os.close(probe_fd)
+        try:
+            os.unlink(name, dir_fd=fd)
+        except OSError:
+            fail("staging write probe cannot be removed")
+    finally:
+        os.close(fd)
+
+
+def _free_bytes(path: str) -> int:
+    try:
+        usage = os.statvfs(path)
+        available = usage.f_bavail * usage.f_frsize
+    except (AttributeError, OSError, TypeError):
+        fail("staging free-space evidence is unavailable")
+    if not isinstance(available, int) or available < FREE_RESERVE_BYTES:
+        fail("staging free-space reserve is insufficient")
+    return available
+
+
+def prepare_staging(
+    *, staging: str = STAGING_PATH, mountinfo_path: str = MOUNTINFO_PATH
+) -> None:
+    _validate_runtime_identity()
+    validate_mount(staging, mountinfo_path)
+    root_metadata = _directory_metadata(staging, "staging mount")
+    paths = (f"{staging}/tmp", f"{staging}/media")
+    for path in paths:
+        child_metadata = _directory_metadata(path, "staging child", create=True)
+        if child_metadata.st_dev != root_metadata.st_dev:
+            fail("staging child is not on the fixed staging mount")
+    _free_bytes(staging)
+    for path in paths:
+        clear_children(path)
+    for path in paths:
+        _directory_metadata(path, "staging child")
+        _probe_write(path)
+    os.environ["TMPDIR"] = f"{staging}/tmp"
+    if os.environ.get("TMPDIR") != f"{staging}/tmp":
+        fail("TMPDIR is not the fixed staging path")
+
+
+def main(arguments: list[str]) -> None:
+    prepare_staging()
+    if not arguments:
+        fail("Synapse command arguments are missing")
+    command = [sys.executable, "-m", "synapse.app.homeserver", *arguments]
+    try:
+        os.execv(sys.executable, command)
+    except OSError:
+        fail("Synapse could not be executed")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

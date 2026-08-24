@@ -4,15 +4,17 @@ Public, reproducible Synapse image for TeleCrypt.
 
 ```text
 official Synapse release
-  + matrix-org S3 storage provider
+  + exact TeleCrypt Synapse fork source archive
+  + exact TeleCrypt S3-provider fork source archive
   + exact external TeleCrypt tier-controller release
   = ghcr.io/telecrypt-io/telecrypt-synapse:<version>
 ```
 
-This repository does not fork or patch Synapse. It uses the official exact Synapse image and its
-supported Python module interface. The TeleCrypt module limits unverified users' uploads, encrypted
-room creation, encryption events, and room count; only Synapse users with `user_type: verified` are
-unrestricted.
+This repository starts from the official exact Synapse image and overlays the Python package from
+the exact TeleCrypt Synapse fork archive. It installs the exact TeleCrypt S3-provider fork archive
+and the external TeleCrypt tier-controller wheel. The TeleCrypt module limits unverified users'
+uploads, encrypted room creation, encryption events, and room count; only Synapse users with
+`user_type: verified` are unrestricted.
 
 ## Image versions
 
@@ -24,14 +26,19 @@ zeros in any numeric component.
   accepts an existing GHCR tag only when it proves the exact tested image identity and digest;
   otherwise it fails closed.
 
-The exact upstream patch version, TeleCrypt revision, Controlplane wheel release, S3-provider
-release, S3-provider source-archive digest, and Controlplane wheel digest are recorded together in
-the checked-in `versions.env` file. The workflow strictly validates that file for every pull request,
-main-branch push, and exact release-tag push, then passes its values to the Dockerfile and OCI
-labels. The Dockerfile has no version defaults, so changing a component requires a reviewed source
-change.
+The exact upstream patch version, TeleCrypt fork release names and commits, Controlplane wheel
+release, source-archive identities (derived from those release names) and digests, and Controlplane
+wheel digest are recorded together in the checked-in `versions.env` and `provenance.lock` files.
+Before downloading either fork archive,
+the workflow fetches the exact GitHub Release by tag and requires `draft: false`, `prerelease: false`,
+explicit `immutable: true`, zero uploaded assets, and an annotated tag that peels to the locked fork
+commit. It then downloads the published GitHub tag archive itself and compares its bytes with the
+locked SHA-256; a locally produced archive is never accepted as a substitute. The workflow strictly
+validates both files for every pull request, main-branch push, and exact release-tag push, then passes
+their values to the Dockerfile and OCI labels. The Dockerfile has no version defaults, so changing a
+component requires a reviewed source change.
 
-The provider's dependencies are installed from the reviewed `s3-provider.lock` file with exact
+The provider fork's dependencies are installed from the reviewed `s3-provider.lock` file with exact
 versions and hashes. GitHub Actions prepares and verifies an exact binary wheelhouse, the provider
 source archive, and the Controlplane wheel before the Docker build; the Controlplane release API
 metadata must identify the exact immutable non-prerelease release and exactly the wheel plus
@@ -80,8 +87,8 @@ runtime.
 
 ## Components
 
-- Base: `ghcr.io/element-hq/synapse:v<version>`.
-- Media provider: [`matrix-org/synapse-s3-storage-provider`](https://github.com/matrix-org/synapse-s3-storage-provider), Apache-2.0, pinned in `versions.env`.
+- Base: `ghcr.io/element-hq/synapse:v<version>`, with the upstream commit recorded in `provenance.lock`.
+- Media provider: the TeleCrypt fork of [`matrix-org/synapse-s3-storage-provider`](https://github.com/TeleCrypt-io/synapse-s3-storage-provider), preserving its Apache-2.0 license and pinned by immutable fork release, commit, and source-archive hash in `provenance.lock`.
 - Policy: [`TeleCrypt-io/controlplane`](https://github.com/TeleCrypt-io/controlplane), installed as a
   `telecrypt_tier_controller` wheel from the exact public GitHub Release 0.4.0. Its exact SHA-256
   digest is recorded in `versions.env` and verified before the offline image build.
@@ -90,9 +97,20 @@ The upstream Synapse base remains an exact release version rather than a digest-
 build records the current linux/amd64 manifest digest for that version tag in the image's OCI base
 digest label and verifies the BuildKit provenance material against that digest. A changed upstream
 tag is therefore detected during the build and the produced image remains independently identifiable.
+The fork release, commit, and source archive identity are recorded in OCI labels and checked before
+image publication; the build fails closed if the immutable source-only release is unavailable or
+either exact archive hash differs.
 
 The provider is configured by Synapse's `media_storage_providers` setting; this image contains no
 S3 endpoint, bucket, or credentials. Those remain server-only secrets.
+
+The image has one fixed `/telecrypt-synapse-entrypoint`. It runs as UID/GID 991, requires the
+Compose-provided `/staging` bind mount to be one writable disk-backed filesystem with the exact
+reviewed ownership and mode, creates and checks `/staging/tmp` and `/staging/media`, and refuses to
+start unless at least 10 GiB (10,737,418,240 bytes) is available. Before Synapse starts it removes
+only children beneath those two disposable directories, sets `TMPDIR=/staging/tmp`, and executes the
+single Synapse homeserver process. It never follows symlinks, crosses nested mounts, or clears the
+mount root.
 
 ## Release and deployment boundary
 

@@ -8,6 +8,7 @@ import datetime
 import hashlib
 import json
 import os
+import posixpath
 import re
 import selectors
 import subprocess
@@ -30,12 +31,17 @@ RFC3339_RE = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z\Z"
 )
 VERSION_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
+FORK_RELEASE_RE = re.compile(
+    r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)-telecrypt\.[1-9][0-9]*\Z"
+)
 DOWNLOAD_TIMEOUT_SECONDS = 60
 PIP_SUBPROCESS_TIMEOUT_SECONDS = 300
 MAX_PIP_OUTPUT_BYTES = 64 * 1024
 GITHUB_API_VERSION = "2026-03-10"
 GITHUB_API_ROOT = "https://api.github.com"
 CONTROLPLANE_REPOSITORY = "TeleCrypt-io/controlplane"
+SYNAPSE_FORK_REPOSITORY = "TeleCrypt-io/synapse"
+S3_PROVIDER_FORK_REPOSITORY = "TeleCrypt-io/synapse-s3-storage-provider"
 CONTROLPLANE_IMAGE = "ghcr.io/telecrypt-io/controlplane"
 MAX_API_JSON_BYTES = 1024 * 1024
 MAX_DIGEST_JSON_BYTES = 64 * 1024
@@ -57,6 +63,20 @@ ALLOWED_DOWNLOAD_HOSTS = frozenset(
 
 def fail(message: str) -> None:
     raise SystemExit(f"prepare inputs: {message}")
+
+
+def synapse_fork_archive_name(release: str) -> str:
+    return f"synapse-{release}.tar.gz"
+
+
+def s3_provider_fork_archive_name(release: str) -> str:
+    return f"synapse-s3-storage-provider-{release}.tar.gz"
+
+
+def fork_source_archive_url(repository: str, release: str) -> str:
+    """Return the exact GitHub-generated source archive for a published fork tag."""
+
+    return f"https://github.com/{repository}/archive/refs/tags/{release}.tar.gz"
 
 
 def run_bounded_pip(command: list[str]) -> None:
@@ -195,8 +215,8 @@ def read_bounded(response, max_bytes: int) -> bytes:
     return bytes(body)
 
 
-def fetch_controlplane_api(endpoint: str, max_bytes: int) -> dict:
-    url = f"{GITHUB_API_ROOT}/repos/{CONTROLPLANE_REPOSITORY}/{endpoint}"
+def fetch_github_api(repository: str, endpoint: str, max_bytes: int, label: str) -> dict:
+    url = f"{GITHUB_API_ROOT}/repos/{repository}/{endpoint}"
     validate_download_url(url, "api.github.com")
     request = urllib.request.Request(
         url,
@@ -209,19 +229,66 @@ def fetch_controlplane_api(endpoint: str, max_bytes: int) -> dict:
     try:
         with URL_OPENER.open(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
             if response.geturl() != url:
-                fail(f"Controlplane API redirected unexpectedly: {response.geturl()}")
+                fail(f"{label} API redirected unexpectedly: {response.geturl()}")
             payload = read_bounded(response, max_bytes)
     except SystemExit:
         raise
     except Exception as exc:
-        fail(f"could not fetch Controlplane API metadata: {exc}")
+        fail(f"could not fetch {label} API metadata: {exc}")
     try:
         metadata = json.loads(payload)
     except (UnicodeDecodeError, ValueError) as exc:
-        fail(f"Controlplane API metadata is not valid JSON: {exc}")
+        fail(f"{label} API metadata is not valid JSON: {exc}")
     if not isinstance(metadata, dict):
-        fail("Controlplane API metadata is not an object")
+        fail(f"{label} API metadata is not an object")
     return metadata
+
+
+def fetch_controlplane_api(endpoint: str, max_bytes: int) -> dict:
+    return fetch_github_api(
+        CONTROLPLANE_REPOSITORY, endpoint, max_bytes, "Controlplane"
+    )
+
+
+def fetch_fork_api(repository: str, endpoint: str) -> dict:
+    return fetch_github_api(repository, endpoint, MAX_API_JSON_BYTES, "fork")
+
+
+def fetch_fork_annotated_tag(repository: str, release: str, expected_commit: str) -> str:
+    ref = fetch_fork_api(repository, f"git/ref/tags/{release}")
+    api_root = f"{GITHUB_API_ROOT}/repos/{repository}"
+    ref_object = ref.get("object")
+    if (
+        ref.get("ref") != f"refs/tags/{release}"
+        or ref.get("url") != f"{api_root}/git/refs/tags/{release}"
+        or not isinstance(ref_object, dict)
+        or ref_object.get("type") != "tag"
+        or ref_object.get("url") != f"{api_root}/git/tags/{ref_object.get('sha')}"
+    ):
+        fail(f"fork release tag is not an annotated tag ref: {repository} {release}")
+    annotated_tag_sha = ref_object.get("sha")
+    if not isinstance(annotated_tag_sha, str) or not GIT_SHA_RE.fullmatch(annotated_tag_sha):
+        fail("fork annotated tag ref has no exact tag-object SHA")
+    tag_object = fetch_fork_api(repository, f"git/tags/{annotated_tag_sha}")
+    if (
+        tag_object.get("type") != "tag"
+        or tag_object.get("sha") != annotated_tag_sha
+        or tag_object.get("tag") != release
+        or tag_object.get("url") != f"{api_root}/git/tags/{annotated_tag_sha}"
+    ):
+        fail("fork annotated tag object has an unexpected tag name")
+    target = tag_object.get("object")
+    source_commit = target.get("sha") if isinstance(target, dict) else None
+    if (
+        not isinstance(target, dict)
+        or target.get("type") != "commit"
+        or target.get("url") != f"{api_root}/git/commits/{source_commit}"
+        or not isinstance(source_commit, str)
+        or not GIT_SHA_RE.fullmatch(source_commit)
+        or source_commit != expected_commit
+    ):
+        fail("fork release tag does not peel to the locked commit")
+    return annotated_tag_sha
 
 
 def fetch_controlplane_release(release: str) -> dict:
@@ -319,6 +386,47 @@ def fetch_controlplane_annotated_tag(release: str) -> tuple[str, str]:
     if not isinstance(source_commit, str) or not GIT_SHA_RE.fullmatch(source_commit):
         fail("Controlplane annotated tag has no exact peeled source commit")
     return annotated_tag_sha, source_commit
+
+
+def validate_fork_release(metadata: dict, repository: str, release: str) -> None:
+    expected_api_root = f"{GITHUB_API_ROOT}/repos/{repository}/releases"
+    expected_html_urls = {
+        f"https://github.com/{repository}/releases/{release}",
+        f"https://github.com/{repository}/releases/tag/{release}",
+    }
+    if (
+        metadata.get("tag_name") != release
+        or metadata.get("name") != release
+        or metadata.get("draft") is not False
+        or metadata.get("prerelease") is not False
+        or metadata.get("immutable") is not True
+        or not isinstance(metadata.get("id"), int)
+        or isinstance(metadata.get("id"), bool)
+        or metadata["id"] <= 0
+        or metadata.get("url") != f"{expected_api_root}/{metadata.get('id')}"
+        or metadata.get("html_url") not in expected_html_urls
+        or metadata.get("assets_url")
+        != f"{expected_api_root}/{metadata.get('id')}/assets"
+        or metadata.get("upload_url")
+        != f"https://uploads.github.com/repos/{repository}/releases/{metadata.get('id')}/assets{{?name,label}}"
+        or metadata.get("tarball_url")
+        != f"{GITHUB_API_ROOT}/repos/{repository}/tarball/{release}"
+        or metadata.get("zipball_url")
+        != f"{GITHUB_API_ROOT}/repos/{repository}/zipball/{release}"
+        or metadata.get("assets") != []
+    ):
+        fail(f"{repository} fork release is not the exact immutable source-only contract")
+
+
+def fetch_fork_release(repository: str, release: str, expected_commit: str) -> None:
+    metadata = fetch_github_api(
+        repository,
+        f"releases/tags/{release}",
+        MAX_API_JSON_BYTES,
+        f"{repository} fork release",
+    )
+    validate_fork_release(metadata, repository, release)
+    fetch_fork_annotated_tag(repository, release, expected_commit)
 
 
 def validate_controlplane_assets(
@@ -487,12 +595,84 @@ def validate_provider_build_contract(path: Path) -> None:
         )
 
 
+def validate_synapse_fork_archive(path: Path, commit: str, release: str | None = None) -> None:
+    """Validate the bounded, safe source archive used for the Synapse overlay."""
+
+    expected_root = f"synapse-{release or commit}"
+    names: set[str] = set()
+    regular_files: set[str] = set()
+    links: list[tuple[str, str]] = []
+    total_uncompressed_bytes = 0
+    try:
+        with tarfile.open(path, mode="r:gz") as archive:
+            for member_number, member in enumerate(archive, 1):
+                if member_number > MAX_ARCHIVE_MEMBERS:
+                    fail(f"Synapse fork archive has more than {MAX_ARCHIVE_MEMBERS} members")
+                name = member.name
+                if (
+                    not name
+                    or "\x00" in name
+                    or any(character in BACKSLASH_CONFUSABLES for character in name)
+                    or name.startswith("/")
+                    or re.match(r"^[A-Za-z]:", name)
+                    or unicodedata.normalize("NFC", name) != name
+                ):
+                    fail(f"Synapse fork archive member path is unsafe: {name!r}")
+                parts = name.split("/")
+                if any(part in {"", ".", ".."} for part in parts):
+                    fail(f"Synapse fork archive member path is unsafe: {name!r}")
+                if len(name.encode("utf-8")) > MAX_ARCHIVE_NAME_BYTES:
+                    fail(f"Synapse fork archive member name exceeds {MAX_ARCHIVE_NAME_BYTES} bytes")
+                if name in names:
+                    fail(f"Synapse fork archive contains a duplicate member: {name}")
+                if any("/".join(parts[:index]) in regular_files for index in range(1, len(parts))):
+                    fail(f"Synapse fork archive places a child below a regular file: {name}")
+                if member.isdir():
+                    if member.size != 0:
+                        fail("Synapse fork archive directory has nonzero size")
+                elif member.isfile():
+                    if member.size < 0:
+                        fail("Synapse fork archive contains a negative file size")
+                    total_uncompressed_bytes += member.size
+                    if total_uncompressed_bytes > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
+                        fail(
+                            "Synapse fork archive exceeds the "
+                            f"{MAX_ARCHIVE_UNCOMPRESSED_BYTES} byte uncompressed limit"
+                        )
+                    regular_files.add(name)
+                elif member.issym():
+                    linkname = member.linkname
+                    if not linkname or linkname.startswith("/") or "\\" in linkname:
+                        fail(f"Synapse fork archive has an unsafe symlink: {name}")
+                    links.append((name, linkname))
+                else:
+                    fail(f"Synapse fork archive contains a non-regular member: {name}")
+                names.add(name)
+    except (OSError, EOFError, tarfile.TarError) as exc:
+        fail(f"Synapse fork archive is not readable: {exc}")
+
+    if expected_root not in names or f"{expected_root}/pyproject.toml" not in regular_files:
+        fail("Synapse fork archive does not contain the expected project root")
+    if f"{expected_root}/synapse/__init__.py" not in regular_files:
+        fail("Synapse fork archive does not contain the expected Synapse package")
+    for name, linkname in links:
+        target = posixpath.normpath(posixpath.join(posixpath.dirname(name), linkname))
+        if not target.startswith(f"{expected_root}/") or target not in names:
+            fail(f"Synapse fork archive symlink escapes its project root: {name}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--lock", type=Path, default=Path("s3-provider.lock"))
     parser.add_argument("--s3-provider-version", required=True)
     parser.add_argument("--s3-provider-archive-sha256", required=True)
+    parser.add_argument("--synapse-fork-release", required=True)
+    parser.add_argument("--synapse-fork-commit", required=True)
+    parser.add_argument("--synapse-fork-archive-sha256", required=True)
+    parser.add_argument("--s3-provider-fork-release", required=True)
+    parser.add_argument("--s3-provider-fork-commit", required=True)
+    parser.add_argument("--s3-provider-fork-archive-sha256", required=True)
     parser.add_argument("--controlplane-release", required=True)
     parser.add_argument("--controlplane-wheel-sha256", required=True)
     return parser.parse_args()
@@ -505,11 +685,27 @@ def main() -> None:
     if not VERSION_RE.fullmatch(args.controlplane_release):
         fail("Controlplane release is not an exact numeric release")
     for name, value in (
+        ("Synapse fork release", args.synapse_fork_release),
+        ("S3-provider fork release", args.s3_provider_fork_release),
+    ):
+        if not FORK_RELEASE_RE.fullmatch(value):
+            fail(f"{name} is not an exact release tag")
+    for name, value in (
+        ("Synapse fork commit", args.synapse_fork_commit),
+        ("S3-provider fork commit", args.s3_provider_fork_commit),
+    ):
+        if not GIT_SHA_RE.fullmatch(value):
+            fail(f"{name} is not an exact lowercase commit")
+    for name, value in (
         ("S3 provider archive", args.s3_provider_archive_sha256),
+        ("Synapse fork archive", args.synapse_fork_archive_sha256),
+        ("S3-provider fork archive", args.s3_provider_fork_archive_sha256),
         ("Controlplane wheel", args.controlplane_wheel_sha256),
     ):
         if not HEX_RE.fullmatch(value):
             fail(f"{name} SHA-256 must be lowercase hexadecimal")
+    if args.s3_provider_archive_sha256 != args.s3_provider_fork_archive_sha256:
+        fail("S3 provider archive hashes disagree")
 
     expected = load_lock(args.lock)
     if args.output.exists() and any(args.output.iterdir()):
@@ -543,12 +739,32 @@ def main() -> None:
     )
     validate_wheelhouse(wheelhouse, expected)
 
-    archive = f"synapse-s3-storage-provider-{args.s3_provider_version}.tar.gz"
-    archive_url = (
-        "https://github.com/matrix-org/synapse-s3-storage-provider/"
-        f"archive/refs/tags/v{args.s3_provider_version}.tar.gz"
+    fetch_fork_release(
+        SYNAPSE_FORK_REPOSITORY,
+        args.synapse_fork_release,
+        args.synapse_fork_commit,
     )
-    download(archive_url, args.output / archive, args.s3_provider_archive_sha256)
+    fetch_fork_release(
+        S3_PROVIDER_FORK_REPOSITORY,
+        args.s3_provider_fork_release,
+        args.s3_provider_fork_commit,
+    )
+    synapse_archive = synapse_fork_archive_name(args.synapse_fork_release)
+    synapse_archive_url = fork_source_archive_url(
+        SYNAPSE_FORK_REPOSITORY, args.synapse_fork_release
+    )
+    download(
+        synapse_archive_url,
+        args.output / synapse_archive,
+        args.synapse_fork_archive_sha256,
+    )
+    validate_synapse_fork_archive(args.output / synapse_archive, args.synapse_fork_commit, args.synapse_fork_release)
+
+    archive = s3_provider_fork_archive_name(args.s3_provider_fork_release)
+    archive_url = fork_source_archive_url(
+        S3_PROVIDER_FORK_REPOSITORY, args.s3_provider_fork_release
+    )
+    download(archive_url, args.output / archive, args.s3_provider_fork_archive_sha256)
     validate_provider_build_contract(args.output / archive)
 
     wheel = f"telecrypt_tier_controller-{args.controlplane_release}-py3-none-any.whl"
@@ -588,7 +804,7 @@ def main() -> None:
                 fail(f"could not stat release input {item}: {exc}")
     if total_input_bytes > MAX_TOTAL_INPUT_BYTES:
         fail(f"release inputs exceed the {MAX_TOTAL_INPUT_BYTES} byte total limit")
-    print(f"prepared and verified {len(expected) + 3} exact image inputs")
+    print(f"prepared and verified {len(expected) + 4} exact image inputs")
 
 
 if __name__ == "__main__":

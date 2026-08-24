@@ -25,6 +25,10 @@ DIGEST_ASSET = f"controlplane-{RELEASE}.digest.json"
 WHEEL_SHA = "f" * 64
 ANNOTATED_TAG_SHA = "a" * 40
 SOURCE_COMMIT = "b" * 40
+FORK_REPOSITORY = "TeleCrypt-io/synapse"
+FORK_RELEASE = "v1.159.0-telecrypt.1"
+FORK_ANNOTATED_TAG_SHA = "d" * 40
+FORK_SOURCE_COMMIT = "e" * 40
 
 
 def record(**changes: object) -> bytes:
@@ -80,6 +84,27 @@ def release_metadata() -> dict[str, object]:
             asset(WHEEL, 1, 7, WHEEL_SHA),
             asset(DIGEST_ASSET, 2, 128, "0" * 64),
         ],
+    }
+
+
+def fork_release_metadata(
+    repository: str = FORK_REPOSITORY,
+    release: str = FORK_RELEASE,
+) -> dict[str, object]:
+    return {
+        "id": 99,
+        "tag_name": release,
+        "name": release,
+        "draft": False,
+        "prerelease": False,
+        "immutable": True,
+        "url": f"https://api.github.com/repos/{repository}/releases/99",
+        "assets_url": f"https://api.github.com/repos/{repository}/releases/99/assets",
+        "upload_url": f"https://uploads.github.com/repos/{repository}/releases/99/assets{{?name,label}}",
+        "html_url": f"https://github.com/{repository}/releases/tag/{release}",
+        "tarball_url": f"https://api.github.com/repos/{repository}/tarball/{release}",
+        "zipball_url": f"https://api.github.com/repos/{repository}/zipball/{release}",
+        "assets": [],
     }
 
 
@@ -165,6 +190,63 @@ class PrepareInputsTests(unittest.TestCase):
             invalid[field] = value
             with self.assertRaises(SystemExit):
                 prepare_inputs.validate_controlplane_release(invalid, RELEASE)
+
+    def test_fork_release_requires_immutable_source_only_release(self) -> None:
+        metadata = fork_release_metadata()
+        prepare_inputs.validate_fork_release(metadata, FORK_REPOSITORY, FORK_RELEASE)
+        for field, value in (
+            ("immutable", False),
+            ("draft", True),
+            ("prerelease", True),
+            ("assets", [{}]),
+            ("name", "wrong-name"),
+            ("upload_url", "https://uploads.github.com/other"),
+        ):
+            invalid = dict(metadata)
+            invalid[field] = value
+            with self.assertRaises(SystemExit):
+                prepare_inputs.validate_fork_release(invalid, FORK_REPOSITORY, FORK_RELEASE)
+
+    def test_fork_release_tag_is_verified_against_immutable_release(self) -> None:
+        responses = {
+            f"releases/tags/{FORK_RELEASE}": fork_release_metadata(),
+            f"git/ref/tags/{FORK_RELEASE}": {
+                "ref": f"refs/tags/{FORK_RELEASE}",
+                "url": f"https://api.github.com/repos/{FORK_REPOSITORY}/git/refs/tags/{FORK_RELEASE}",
+                "object": {
+                    "type": "tag",
+                    "sha": FORK_ANNOTATED_TAG_SHA,
+                    "url": f"https://api.github.com/repos/{FORK_REPOSITORY}/git/tags/{FORK_ANNOTATED_TAG_SHA}",
+                },
+            },
+            f"git/tags/{FORK_ANNOTATED_TAG_SHA}": {
+                "type": "tag",
+                "sha": FORK_ANNOTATED_TAG_SHA,
+                "tag": FORK_RELEASE,
+                "url": f"https://api.github.com/repos/{FORK_REPOSITORY}/git/tags/{FORK_ANNOTATED_TAG_SHA}",
+                "object": {
+                    "type": "commit",
+                    "sha": FORK_SOURCE_COMMIT,
+                    "url": f"https://api.github.com/repos/{FORK_REPOSITORY}/git/commits/{FORK_SOURCE_COMMIT}",
+                },
+            },
+        }
+        with mock.patch.object(
+            prepare_inputs,
+            "fetch_github_api",
+            side_effect=lambda repository, endpoint, max_bytes, label: responses[endpoint],
+        ):
+            prepare_inputs.fetch_fork_release(FORK_REPOSITORY, FORK_RELEASE, FORK_SOURCE_COMMIT)
+        with mock.patch.object(
+            prepare_inputs,
+            "fetch_github_api",
+            side_effect=lambda repository, endpoint, max_bytes, label: {
+                **responses[endpoint],
+                **({"immutable": False} if endpoint.startswith("releases/") else {}),
+            },
+        ):
+            with self.assertRaises(SystemExit):
+                prepare_inputs.fetch_fork_release(FORK_REPOSITORY, FORK_RELEASE, FORK_SOURCE_COMMIT)
 
     def test_asset_state_and_api_url_are_exact(self) -> None:
         for field, value in (

@@ -1,0 +1,17 @@
+# Exact source provenance for the forked media implementation and image policy.
+# Archive hashes identify the bytes returned by the published GitHub release-tag
+# archive URL. The fork release tags and commits must be present at their
+# immutable refs before a hosted image build is permitted; preparation downloads
+# those bytes and verifies these hashes before handing them to Docker.
+SYNAPSE_UPSTREAM_TAG=v1.159.0
+SYNAPSE_UPSTREAM_COMMIT=7b10e6b9bc2dacc33f0974c999f640b55ef831bc
+SYNAPSE_FORK_RELEASE=v1.159.0-telecrypt.1
+SYNAPSE_FORK_COMMIT=323138c24a5baa0da49fecc9fe14d78cad9901d1
+SYNAPSE_FORK_ARCHIVE_SHA256=430482202bc729136b272f1c2bfe5c6937a6d757ae8500de2e705d0a0056d0ad
+S3_PROVIDER_UPSTREAM_TAG=v1.7.0
+S3_PROVIDER_UPSTREAM_COMMIT=208157c67ec7321515d07915bb276ae30d69d760
+S3_PROVIDER_FORK_RELEASE=v1.7.0-telecrypt.1
+S3_PROVIDER_FORK_COMMIT=89627fc637da1c8ccc4d2b9b1714d07a5d62d461
+S3_PROVIDER_FORK_ARCHIVE_SHA256=b37d1805ce9276724aef0ef7289a1588045fa2c47a2fad27330ce1c74256eec9
+CONTROLPLANE_RELEASE=0.4.0
+CONTROLPLANE_WHEEL_SHA256=f9e6627c79b5ad3636132c55cdeccea477accb58babf6536f5d1aca3fef61165

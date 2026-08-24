@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.metadata as metadata
 import os
+import stat
 from pathlib import Path
 
 from synapse.module_api import ModuleApi
@@ -32,6 +33,14 @@ expected_versions = {
 actual_versions = {name: metadata.version(name) for name in expected_versions}
 require(actual_versions == expected_versions, (expected_versions, actual_versions))
 
+for name in (
+    "EXPECTED_SYNAPSE_FORK_RELEASE",
+    "EXPECTED_SYNAPSE_FORK_COMMIT",
+    "EXPECTED_S3_PROVIDER_FORK_RELEASE",
+    "EXPECTED_S3_PROVIDER_FORK_COMMIT",
+):
+    require(bool(expected(name)), f"missing {name}")
+
 installed_modules = (tier_controller, s3_storage_provider)
 require(
     all("site-packages" in Path(module.__file__).parts for module in installed_modules),
@@ -41,6 +50,16 @@ require(
 required_files = (Path("/licenses/LICENSE"), Path("/licenses/THIRD_PARTY_NOTICES.md"))
 require(
     all(path.is_file() and path.stat().st_size > 0 for path in required_files), required_files
+)
+
+entrypoint = Path("/telecrypt-synapse-entrypoint")
+entrypoint_lines = entrypoint.read_text(encoding="utf-8").splitlines() if entrypoint.is_file() else []
+require(
+    entrypoint.is_file()
+    and stat.S_IMODE(entrypoint.stat().st_mode) == 0o755
+    and entrypoint_lines
+    and entrypoint_lines[0] == "#!/usr/local/bin/python",
+    entrypoint,
 )
 
 controller_files = {
