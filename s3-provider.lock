@@ -1,0 +1,15 @@
+# Requirements-style lock for synapse-s3-storage-provider v1.7.0.
+#
+# The Synapse v1.159.0 base already supplies these provider requirements at exact
+# versions; Dockerfile checks those versions before installation:
+#   psycopg2==2.9.11, PyYAML==6.0.3, Twisted==25.5.0,
+#   python-dateutil==2.9.0.post0, six==1.17.0, urllib3==2.7.0.
+#
+# These are absent from that base and are installed directly at the reviewed
+# versions below. --no-deps prevents pip from resolving anything else.
+boto3==1.43.78 --hash=sha256:893f06a171469618e17de78dc927aca6e74fcf45a70d2c5918e9ac9919e96cc9
+botocore==1.43.78 --hash=sha256:ddd020493235e264b3bd12606f239a3d3b2dd7cfb1d25a0691061183c290c228
+humanize==4.16.0 --hash=sha256:353eb2f34c09d098b2880eee8bef21832eae6d174f48c5762fff7e5fcb74d01d
+jmespath==1.1.0 --hash=sha256:a5663118de4908c91729bea0acadca56526eb2698e83de10cd116ae0f4e97c64
+s3transfer==0.19.2 --hash=sha256:d8168eccca828cbb2cd573675333f3bddd254313a9c42494b84c76b539e8ba25
+tqdm==4.70.0 --hash=sha256:7f585706bfddbdebf89daac705b2dfcc16890130727d3197ca62c732b4310953

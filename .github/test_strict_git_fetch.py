@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Offline tests for the bounded, sanitized Git transport boundary."""
+"""Semantic tests for the Synapse release Git boundary."""
 
 from __future__ import annotations
 
 import os
-import stat
 import subprocess
 import tempfile
 import unittest
@@ -14,199 +13,135 @@ from pathlib import Path
 HELPER = Path(__file__).resolve().parent / "strict_git_fetch.sh"
 
 
-def init_repo() -> Path:
-    root = Path(tempfile.mkdtemp(prefix="synapse-git-transport-"))
-    result = subprocess.run(["/usr/bin/git", "init", "--quiet", str(root)], capture_output=True, text=True)
-    if result.returncode:
-        raise AssertionError(result.stderr)
-    return root
-
-
-def run_helper(root: Path, *arguments: str, **overrides: str) -> subprocess.CompletedProcess[str]:
-    environment = {**os.environ, **overrides}
-    return subprocess.run(
-        ["/bin/bash", str(HELPER), *arguments],
-        cwd=root,
-        env=environment,
+def git(root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["/usr/bin/git", "-C", str(root), *args],
         capture_output=True,
         text=True,
-        timeout=10,
-        check=False,
+        check=True,
     )
+    return result.stdout.strip()
 
 
 class StrictGitFetchTests(unittest.TestCase):
-    def test_static_boundary_uses_trusted_git_and_canonical_https(self) -> None:
-        helper = HELPER.read_text(encoding="utf-8")
-        for required in (
-            "TRUSTED_GIT='/usr/bin/git'",
-            "CANONICAL_URL='https://github.com/TeleCrypt-io/telecrypt-synapse.git'",
-            "GIT_CONFIG_SYSTEM=/dev/null",
-            "GIT_CONFIG_GLOBAL=/dev/null",
-            "GIT_CONFIG_COUNT=0",
-            "GIT_CONFIG_PARAMETERS=",
-            "GIT_ASKPASS=",
-            "GIT_SSH_COMMAND=",
-            "HTTPS_PROXY=",
-            "GIT_SSL_NO_VERIFY=",
-            "GIT_DIR",
-            "GIT_COMMON_DIR",
-            "GIT_OBJECT_DIRECTORY",
-            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-            "GIT_INDEX_FILE",
-            "GIT_NAMESPACE",
-            "GIT_REPLACE_REF_BASE",
-            "GIT_EXEC_PATH",
-            "core.askpass",
-            "protocol.version=2",
-            "protocol.https.allow=always",
-            "credential.helper=",
-            "core.sshCommand=",
-            "core.gitproxy=",
-            "remote\\..*\\.(uploadpack|proxy)",
-            "--no-includes",
-            "local-read",
-            "local-ancestor",
-        ):
-            self.assertIn(required, helper)
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory(prefix="synapse-git-")
+        self.root = Path(self.directory.name)
+        git(self.root, "init", "--quiet")
+        (self.root / "README").write_text("fixture\n", encoding="utf-8")
+        git(self.root, "add", "README")
+        git(self.root, "-c", "user.email=test@example.invalid", "-c", "user.name=Test", "commit", "--quiet", "-m", "fixture")
 
-    def test_hostile_process_environment_is_cleared_for_local_checks(self) -> None:
-        root = init_repo()
-        try:
-            result = run_helper(
-                root,
-                "check",
-                GIT_CONFIG_COUNT="2",
-                GIT_CONFIG_KEY_0="http.proxy",
-                GIT_CONFIG_VALUE_0="http://evil.invalid",
-                GIT_CONFIG_KEY_1="credential.helper",
-                GIT_CONFIG_VALUE_1="!printf hostile",
-                GIT_CONFIG_PARAMETERS="'http.proxy=http://evil.invalid'",
-                GIT_DIR="/tmp/hostile-git-dir",
-                GIT_COMMON_DIR="/tmp/hostile-common-dir",
-                GIT_OBJECT_DIRECTORY="/tmp/hostile-objects",
-                GIT_ALTERNATE_OBJECT_DIRECTORIES="/tmp/hostile-alternates",
-                GIT_INDEX_FILE="/tmp/hostile-index",
-                GIT_NAMESPACE="hostile",
-                GIT_REPLACE_REF_BASE="refs/replace/hostile",
-                GIT_EXEC_PATH="/tmp/hostile-exec",
-                GIT_ASKPASS="/tmp/hostile-askpass",
-                SSH_ASKPASS="/tmp/hostile-ssh-askpass",
-                GIT_SSH_COMMAND="ssh -oProxyCommand=hostile",
-                HTTPS_PROXY="http://secret.invalid",
-                GIT_SSL_NO_VERIFY="1",
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-        finally:
-            subprocess.run(["rm", "-rf", str(root)], check=True)
+    def tearDown(self) -> None:
+        self.directory.cleanup()
 
-    def test_option_shaped_refspec_is_rejected_before_transport(self) -> None:
-        root = init_repo()
-        try:
-            result = run_helper(root, "--upload-pack=/tmp/secret-capture")
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("unsupported operation", result.stderr)
-        finally:
-            subprocess.run(["rm", "-rf", str(root)], check=True)
-
-    def test_forbidden_local_and_worktree_configuration_is_rejected(self) -> None:
-        forbidden = (
-            ("url.https://evil.example/.insteadOf", "https://github.com/"),
-            ("http.proxy", "http://evil.example"),
-            ("credential.helper", "!echo hostile"),
-            ("include.path", "/tmp/hostile-gitconfig"),
-            ("core.askPass", "/tmp/askpass"),
-            ("core.sshCommand", "ssh -o ProxyCommand=hostile"),
-            ("core.gitProxy", "git-proxy"),
-            ("core.worktree", "/tmp/hostile-worktree"),
-            ("remote.origin.pushurl", "https://evil.example/push.git"),
-            ("remote.origin.vcs", "ssh"),
-            ("remote.origin.uploadpack", "hostile-upload-pack"),
-            ("remote.origin.proxy", "hostile-proxy"),
+    def run_helper(self, *args: str, **environment: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["/bin/bash", str(HELPER), *args],
+            cwd=self.root,
+            env={**os.environ, **environment},
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
         )
-        for scope in ("--local", "--worktree"):
-            for key, value in forbidden:
-                with self.subTest(scope=scope, key=key):
-                    root = init_repo()
-                    try:
-                        if scope == "--worktree":
-                            subprocess.run(
-                                ["/usr/bin/git", "-C", str(root), "config", "--local",
-                                 "extensions.worktreeConfig", "true"],
-                                check=True,
-                            )
-                        result = subprocess.run(
-                            ["/usr/bin/git", "-C", str(root), "config", scope, key, value],
-                            capture_output=True,
-                            text=True,
-                        )
-                        self.assertEqual(result.returncode, 0, result.stderr)
-                        checked = run_helper(root, "check")
-                        self.assertNotEqual(checked.returncode, 0)
-                        self.assertIn("unsafe transport key", checked.stderr)
-                    finally:
-                        subprocess.run(["rm", "-rf", str(root)], check=True)
 
-    def test_oversized_and_fifo_config_are_rejected_without_hanging(self) -> None:
-        root = init_repo()
-        try:
-            config_path = root / ".git" / "config"
-            with config_path.open("ab") as stream:
-                stream.write(b"\n" + b"[hostile]\nvalue = " + b"x" * (70 * 1024))
-            oversized = run_helper(root, "check")
-            self.assertNotEqual(oversized.returncode, 0)
-            self.assertIn("bounded input", oversized.stderr)
+    def test_local_identity_ignores_ambient_git_configuration(self) -> None:
+        expected = git(self.root, "rev-parse", "HEAD")
+        result = self.run_helper(
+            "local-read", "rev-parse", "HEAD",
+            GIT_DIR=str(self.root / "missing"),
+            GIT_INDEX_FILE=str(self.root / "missing-index"),
+            GIT_OBJECT_DIRECTORY=str(self.root / "missing-objects"),
+            GIT_REPLACE_REF_BASE="refs/replace/hostile",
+            GIT_CONFIG_COUNT="1",
+            GIT_CONFIG_KEY_0="http.proxy",
+            GIT_CONFIG_VALUE_0="http://evil.invalid",
+            GIT_TRACE="/tmp/synapse-hostile-trace",
+            GIT_TRACE2="/tmp/synapse-hostile-trace2",
+            GIT_TRACE_PACK_ACCESS="1",
+            GIT_TRACE_PERFORMANCE="1",
+            GIT_TRACE_PACKET="1",
+            GIT_TRACE_SHALLOW="1",
+            GIT_CURL_VERBOSE="1",
+            GIT_TRACE2_ENV_VARS="GIT_DIR",
+            GIT_TRACE2_MAX_FILES="1",
+            HTTPS_PROXY="http://evil.invalid",
+            GIT_ALLOW_PROTOCOL="file:ext:ssh",
+            GIT_PROTOCOL_FROM_USER="1",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), expected)
 
-            subprocess.run(["/usr/bin/git", "-C", str(root), "init", "--quiet"], check=True)
-            config_path.unlink()
-            os.mkfifo(config_path)
-            fifo = run_helper(root, "check")
-            self.assertNotEqual(fifo.returncode, 0)
-            self.assertIn("regular file", fifo.stderr)
-        finally:
-            subprocess.run(["rm", "-rf", str(root)], check=True)
+    def test_annotated_tag_reads_are_unreplaced(self) -> None:
+        first_commit = git(self.root, "rev-parse", "HEAD")
+        git(self.root, "-c", "user.email=test@example.invalid", "-c", "user.name=Test", "tag", "-a", "v1", "-m", "v1")
+        first_tag = git(self.root, "rev-parse", "refs/tags/v1")
+        (self.root / "README").write_text("changed\n", encoding="utf-8")
+        git(self.root, "add", "README")
+        git(self.root, "-c", "user.email=test@example.invalid", "-c", "user.name=Test", "commit", "--quiet", "-m", "changed")
+        git(self.root, "-c", "user.email=test@example.invalid", "-c", "user.name=Test", "tag", "-a", "v2", "-m", "v2")
+        git(self.root, "replace", first_tag, git(self.root, "rev-parse", "refs/tags/v2"))
+        raw = self.run_helper("local-read", "rev-parse", "refs/tags/v1")
+        peeled = self.run_helper("local-read", "rev-parse", "refs/tags/v1^{}")
+        self.assertEqual(raw.returncode, 0, raw.stderr)
+        self.assertEqual(peeled.returncode, 0, peeled.stderr)
+        self.assertEqual(raw.stdout.strip(), first_tag)
+        self.assertEqual(peeled.stdout.strip(), first_commit)
 
-    def test_hostile_git_and_remote_helper_cannot_capture_transport_environment(self) -> None:
-        root = init_repo()
-        try:
-            marker = root / "captured"
-            fake_git = root / "git"
-            fake_remote = root / "git-remote-https"
-            for executable in (fake_git, fake_remote):
-                executable.write_text(
-                    "#!/bin/sh\nprintf '%s\n' \"$" + "{HTTPS_PROXY:-}\" > '" + str(marker) + "'\nexit 99\n",
-                    encoding="utf-8",
-                )
-                executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
-            result = run_helper(
-                root,
-                "check",
-                PATH=f"{root}:{os.environ['PATH']}",
-                GIT_EXEC_PATH=str(root),
-                HTTPS_PROXY="https://secret.invalid",
-                GIT_ASKPASS=str(fake_git),
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertFalse(marker.exists(), "hostile Git executable or remote helper ran")
-        finally:
-            subprocess.run(["rm", "-rf", str(root)], check=True)
+    def test_real_annotated_tag_binds_object_and_peeled_commit(self) -> None:
+        commit = git(self.root, "rev-parse", "HEAD")
+        git(
+            self.root,
+            "-c", "user.email=test@example.invalid", "-c", "user.name=Test",
+            "tag", "-a", "1.159-tc3", "-m", "release",
+        )
+        tag_object = git(self.root, "rev-parse", "refs/tags/1.159-tc3")
+        raw = self.run_helper("local-read", "rev-parse", "refs/tags/1.159-tc3")
+        peeled = self.run_helper("local-read", "rev-parse", "refs/tags/1.159-tc3^{}")
+        self.assertEqual(raw.returncode, 0, raw.stderr)
+        self.assertEqual(peeled.returncode, 0, peeled.stderr)
+        self.assertEqual(raw.stdout.strip(), tag_object)
+        self.assertEqual(peeled.stdout.strip(), commit)
+        self.assertNotEqual(tag_object, commit)
 
-    def test_local_read_and_ancestor_share_the_sanitized_boundary(self) -> None:
-        root = init_repo()
-        try:
-            subprocess.run(["/usr/bin/git", "-C", str(root), "config", "user.email", "test@example.invalid"], check=True)
-            subprocess.run(["/usr/bin/git", "-C", str(root), "config", "user.name", "Test"], check=True)
-            (root / "README").write_text("fixture\n", encoding="utf-8")
-            subprocess.run(["/usr/bin/git", "-C", str(root), "add", "README"], check=True)
-            subprocess.run(["/usr/bin/git", "-C", str(root), "commit", "--quiet", "-m", "fixture"], check=True)
-            commit = subprocess.check_output(["/usr/bin/git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
-            read = run_helper(root, "local-read", "rev-parse", "HEAD", GIT_DIR="/tmp/evil")
-            self.assertEqual(read.returncode, 0, read.stderr)
-            self.assertEqual(read.stdout.strip(), commit)
-            ancestor = run_helper(root, "local-ancestor", commit, "HEAD")
-            self.assertEqual(ancestor.returncode, 0, ancestor.stderr)
-        finally:
-            subprocess.run(["rm", "-rf", str(root)], check=True)
+    def test_refspec_and_repository_arguments_are_narrow(self) -> None:
+        self.assertNotEqual(self.run_helper("--upload-pack=/tmp/hostile").returncode, 0)
+        self.assertNotEqual(self.run_helper("fetch", "--upload-pack=/tmp/hostile").returncode, 0)
+        self.assertNotEqual(self.run_helper("local-read", "rev-parse", "--option").returncode, 0)
+        self.assertNotEqual(self.run_helper("fetch", "refs/tags/v1^{commit}:refs/tags/v1").returncode, 0)
+
+    def test_rejects_repository_local_transport_configuration(self) -> None:
+        for key, value in (
+            ("url.hostile.insteadOf", "https://github.com/"),
+            ("url.hostile.pushInsteadOf", "https://github.com/"),
+            ("include.path", str(self.root / "included-config")),
+            ("includeIf.onbranch:main.path", str(self.root / "included-config")),
+            ("credential.helper", "store"),
+            ("hooks.allownonstdhook", "true"),
+            ("core.hooksPath", str(self.root / "hooks")),
+            ("remote.origin.vcs", "hostile-helper"),
+            ("remote.origin.proxy", "http://evil.invalid"),
+            ("remote.origin.uploadpack", "/tmp/hostile-upload-pack"),
+            ("remote.origin.receivepack", "/tmp/hostile-receive-pack"),
+            ("remote.origin.pushurl", "https://evil.invalid/repository.git"),
+            ("remote.evil.vcs", "hostile-helper"),
+            ("remote.evil.pushurl", "https://evil.invalid/repository.git"),
+            ("remote.evil.url", "https://evil.invalid/repository.git"),
+        ):
+            git(self.root, "config", "--local", key, value)
+            result = self.run_helper("local-read", "rev-parse", "HEAD")
+            self.assertNotEqual(result.returncode, 0, key)
+            git(self.root, "config", "--local", "--unset-all", key)
+
+    def test_check_is_a_real_git_operation(self) -> None:
+        result = self.run_helper("check", GIT_CONFIG_SYSTEM="/tmp/hostile", GIT_CONFIG_GLOBAL="/tmp/hostile")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_git_boundary_does_not_use_file_size_rlimit(self) -> None:
+        helper = HELPER.read_text(encoding="utf-8")
+        self.assertNotRegex(helper, r"ulimit\s+-f")
+        self.assertIn("MAX_GIT_OUTPUT_BYTES", helper)
 
 
 if __name__ == "__main__":

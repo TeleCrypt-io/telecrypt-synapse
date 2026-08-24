@@ -14,8 +14,11 @@ VERSION_KEYS = (
     "S3_PROVIDER_VERSION",
     "CONTROLPLANE_RELEASE",
 )
+HASH_KEYS = ("S3_PROVIDER_ARCHIVE_SHA256", "CONTROLPLANE_WHEEL_SHA256")
+ALL_KEYS = (*VERSION_KEYS, *HASH_KEYS)
 VERSION_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
 REVISION_RE = re.compile(r"[1-9][0-9]*\Z")
+SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def fail(message: str) -> None:
@@ -33,7 +36,7 @@ def load_versions(path: Path) -> dict[str, str]:
         if raw_line != raw_line.strip() or raw_line.count("=") != 1:
             fail(f"line {line_number} must be KEY=value without surrounding whitespace")
         key, value = raw_line.split("=", 1)
-        if key not in VERSION_KEYS:
+        if key not in ALL_KEYS:
             fail(f"line {line_number} has unknown key {key!r}")
         if key in values:
             fail(f"line {line_number} duplicates {key}")
@@ -41,7 +44,7 @@ def load_versions(path: Path) -> dict[str, str]:
             fail(f"line {line_number} has an empty value for {key}")
         values[key] = value
 
-    missing = [key for key in VERSION_KEYS if key not in values]
+    missing = [key for key in ALL_KEYS if key not in values]
     if missing:
         fail(f"missing required keys: {', '.join(missing)}")
     for key in VERSION_KEYS:
@@ -49,6 +52,9 @@ def load_versions(path: Path) -> dict[str, str]:
         pattern = REVISION_RE if key == "TELECRYPT_REVISION" else VERSION_RE
         if not pattern.fullmatch(value):
             fail(f"{key} must be an exact numeric release, got {value!r}")
+    for key in HASH_KEYS:
+        if not SHA256_RE.fullmatch(values[key]):
+            fail(f"{key} must be a lowercase SHA-256 digest, got {values[key]!r}")
     return values
 
 
@@ -57,7 +63,7 @@ def main() -> None:
         raise SystemExit("usage: validate_versions.py versions.env")
     values = load_versions(Path(sys.argv[1]))
     image_tag = f"{values['SYNAPSE_VERSION'].rsplit('.', 1)[0]}-tc{values['TELECRYPT_REVISION']}"
-    for key in (*VERSION_KEYS, "IMAGE_TAG"):
+    for key in (*ALL_KEYS, "IMAGE_TAG"):
         print(f"{key}={values[key] if key in values else image_tag}")
 
 

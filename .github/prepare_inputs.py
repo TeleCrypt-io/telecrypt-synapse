@@ -9,13 +9,13 @@ import hashlib
 import json
 import os
 import re
-import resource
 import selectors
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
+import unicodedata
 import urllib.request
 from urllib.parse import urljoin, urlsplit
 from pathlib import Path
@@ -43,6 +43,7 @@ MAX_TOTAL_INPUT_BYTES = 256 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 4096
 MAX_ARCHIVE_NAME_BYTES = 4096
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
+BACKSLASH_CONFUSABLES = frozenset("\\\u2216\u29f5\ufe68\uff3c")
 ALLOWED_DOWNLOAD_HOSTS = frozenset(
     {
         "github.com",
@@ -58,17 +59,12 @@ def fail(message: str) -> None:
     raise SystemExit(f"prepare inputs: {message}")
 
 
-def limit_pip_file_size() -> None:
-    resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_FILE_BYTES, MAX_FILE_BYTES))
-
-
 def run_bounded_pip(command: list[str]) -> None:
     try:
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            preexec_fn=limit_pip_file_size,
         )
     except OSError as exc:
         fail(f"could not start pip download: {exc}")
@@ -429,22 +425,54 @@ def validate_provider_build_contract(path: Path) -> None:
     try:
         with tarfile.open(path, mode="r:gz") as archive:
             names = []
+            seen_names = set()
+            seen_files = set()
             total_uncompressed_bytes = 0
             for member_number, member in enumerate(archive, 1):
                 if member_number > MAX_ARCHIVE_MEMBERS:
                     fail(f"provider source archive has more than {MAX_ARCHIVE_MEMBERS} members")
-                if len(member.name.encode("utf-8")) > MAX_ARCHIVE_NAME_BYTES:
+                name = member.name
+                if (
+                    not name
+                    or "\x00" in name
+                    or any(character in BACKSLASH_CONFUSABLES for character in name)
+                    or name.startswith("/")
+                    or re.match(r"^[A-Za-z]:", name)
+                    or unicodedata.normalize("NFC", name) != name
+                ):
+                    fail(f"provider source archive member path is unsafe: {name!r}")
+                parts = name.split("/")
+                if any(part in {"", ".", ".."} for part in parts):
+                    fail(f"provider source archive member path is unsafe: {name!r}")
+                try:
+                    name_bytes = name.encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    fail(f"provider source archive member path is not UTF-8: {exc}")
+                if len(name_bytes) > MAX_ARCHIVE_NAME_BYTES:
                     fail(f"provider source archive member name exceeds {MAX_ARCHIVE_NAME_BYTES} bytes")
-                if member.isfile():
+                if name in seen_names:
+                    fail(f"provider source archive contains a duplicate member: {name}")
+                if any("/".join(parts[:index]) in seen_files for index in range(1, len(parts))):
+                    fail(f"provider source archive places a child below a regular file: {name}")
+                if member.isdir():
+                    if member.size != 0:
+                        fail(f"provider source archive directory has nonzero size: {name}")
+                elif member.isfile():
                     if member.size < 0:
                         fail("provider source archive contains a negative file size")
+                    if any(existing.startswith(f"{name}/") for existing in seen_names):
+                        fail(f"provider source archive makes a regular file a directory: {name}")
                     total_uncompressed_bytes += member.size
                     if total_uncompressed_bytes > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
                         fail(
                             "provider source archive exceeds the "
                             f"{MAX_ARCHIVE_UNCOMPRESSED_BYTES} byte uncompressed limit"
                         )
-                    names.append(member.name)
+                    names.append(name)
+                    seen_files.add(name)
+                else:
+                    fail(f"provider source archive contains a non-regular member: {name}")
+                seen_names.add(name)
     except (OSError, EOFError, tarfile.TarError) as exc:
         fail(f"provider source archive is not readable: {exc}")
 

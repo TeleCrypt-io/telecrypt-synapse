@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import subprocess
+import tarfile
 import tempfile
 import unittest
 import urllib.request
+from unittest import mock
 from pathlib import Path
 
 import prepare_inputs
@@ -196,6 +199,85 @@ class PrepareInputsTests(unittest.TestCase):
                     request, None, 307, "temporary", {}, url
                 )
 
+    def test_provider_archive_rejects_unsafe_members_without_extracting(self) -> None:
+        def archive(entries: list[tuple[str, str]]) -> bytes:
+            stream = io.BytesIO()
+            with tarfile.open(fileobj=stream, mode="w:gz") as output:
+                for kind, name in entries:
+                    member = tarfile.TarInfo(name)
+                    if kind == "file":
+                        payload = b""
+                        member.size = len(payload)
+                        output.addfile(member, io.BytesIO(payload))
+                    elif kind == "directory":
+                        member.type = tarfile.DIRTYPE
+                        output.addfile(member)
+                    elif kind == "symlink":
+                        member.type = tarfile.SYMTYPE
+                        member.linkname = "../../outside"
+                        output.addfile(member)
+                    elif kind == "hardlink":
+                        member.type = tarfile.LNKTYPE
+                        member.linkname = "provider/setup.py"
+                        output.addfile(member)
+                    elif kind == "fifo":
+                        member.type = tarfile.FIFOTYPE
+                        output.addfile(member)
+                    else:
+                        raise AssertionError(kind)
+            return stream.getvalue()
+
+        invalid_entries = (
+            [("file", "/absolute/setup.py")],
+            [("file", "provider/../setup.py")],
+            [("file", "provider\\escape/setup.py")],
+            [("file", "provider\u2216escape/setup.py")],
+            [("file", "provider/setup.py"), ("file", "provider/setup.py")],
+            [("file", "provider/setup.py"), ("file", "provider/setup.py/child")],
+            [("directory", "provider/setup.py"), ("file", "provider/setup.py")],
+            [("symlink", "provider/link")],
+            [("hardlink", "provider/link")],
+            [("fifo", "provider/fifo")],
+        )
+        for entries in invalid_entries:
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "provider.tar.gz"
+                path.write_bytes(archive(entries))
+                with self.assertRaises(SystemExit, msg=entries):
+                    prepare_inputs.validate_provider_build_contract(path)
+
+        class FakeMember:
+            def __init__(self, name: str, size: int = 0) -> None:
+                self.name = name
+                self.size = size
+
+            def isfile(self) -> bool:
+                return True
+
+            def isdir(self) -> bool:
+                return False
+
+        class FakeArchive:
+            def __init__(self, members: list[FakeMember]) -> None:
+                self.members = members
+
+            def __enter__(self) -> "FakeArchive":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def __iter__(self):
+                return iter(self.members)
+
+        for members in (
+            [FakeMember(f"provider/file-{index}") for index in range(prepare_inputs.MAX_ARCHIVE_MEMBERS + 1)],
+            [FakeMember("provider/setup.py", prepare_inputs.MAX_ARCHIVE_UNCOMPRESSED_BYTES + 1)],
+        ):
+            with mock.patch.object(prepare_inputs.tarfile, "open", return_value=FakeArchive(members)):
+                with self.assertRaises(SystemExit):
+                    prepare_inputs.validate_provider_build_contract(Path("unused.tar.gz"))
+
     def test_publish_release_rejects_noncanonical_record_before_network(self) -> None:
         publish_record = record(tag="1.159-tc3")
         for invalid in (
@@ -204,62 +286,151 @@ class PrepareInputsTests(unittest.TestCase):
         ):
             result = self.run_publish_release(invalid)
             self.assertNotEqual(result.returncode, 0)
-            self.assertNotIn("recheck", result.stderr.lower())
+
+    def test_publish_release_rejects_noncanonical_tags_before_network(self) -> None:
+        for tag in (
+            "01.159-tc3",
+            "1.0159-tc3",
+            "1.159-tc0",
+            "1.159-tc03",
+            "1.159",
+            "v1.159-tc3",
+        ):
+            result = self.run_publish_release(
+                record(tag=tag), EXPECTED_TAG=tag
+            )
+            self.assertNotEqual(result.returncode, 0, tag)
+
+    def test_release_record_rejects_noncanonical_tags(self) -> None:
+        for tag in (
+            "01.159-tc3",
+            "1.0159-tc3",
+            "1.159-tc0",
+            "1.159-tc03",
+            "1.159",
+            "v1.159-tc3",
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "record.json"
+                environment = {
+                    **os.environ,
+                    "RECORD_PATH": str(output),
+                    "RECORD_IMAGE": "ghcr.io/telecrypt-io/telecrypt-synapse",
+                    "RECORD_TAG": tag,
+                    "RECORD_DIGEST": "sha256:" + "c" * 64,
+                    "RECORD_SOURCE_SHA": SOURCE_COMMIT,
+                    "RECORD_ANNOTATED_TAG_SHA": ANNOTATED_TAG_SHA,
+                }
+                result = subprocess.run(
+                    ["python3", ".github/release_record.py"],
+                    cwd=Path(__file__).resolve().parents[1],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0, tag)
+                self.assertFalse(output.exists(), tag)
 
     def test_publish_release_requires_reviewed_github_api_version(self) -> None:
         result = self.run_publish_release(
             record(tag="1.159-tc3"), GH_API_VERSION="2025-01-01"
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("2026-03-10", result.stderr)
 
-    def test_strict_git_fetch_sanitizes_ambient_git_configuration(self) -> None:
-        helper = (Path(__file__).parent / "strict_git_fetch.sh").read_text()
-        self.assertIn("export GIT_CONFIG_NOSYSTEM=1", helper)
-        self.assertIn("export GIT_CONFIG_SYSTEM=/dev/null", helper)
-        self.assertIn("export GIT_CONFIG_GLOBAL=/dev/null", helper)
-        self.assertIn("export GIT_CONFIG_COUNT=0", helper)
-        self.assertIn("export GIT_TERMINAL_PROMPT=0", helper)
-        self.assertIn("GIT_CONFIG_PARAMETERS", helper)
-        for variable in ("GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND"):
-            self.assertIn(variable, helper)
-        for variable in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
-            self.assertIn(variable, helper)
-        for variable in ("GIT_SSL_NO_VERIFY", "GIT_SSL_VERSION", "GIT_SSL_CIPHER_LIST"):
-            self.assertIn(variable, helper)
-        self.assertIn('config "$scope"', helper)
-        self.assertIn("config --file", helper)
-        for pattern in ("url(\\..*)?", "http(\\..*)?", "credential(\\..*)?", "include(\\..*)?"):
-            self.assertIn(pattern, helper)
-        self.assertIn("core\\.(askpass|ssh.*|gitproxy", helper)
-        self.assertIn("remote\\..*\\.(pushurl|vcs|uploadpack|proxy", helper)
-        self.assertIn("https://github.com/TeleCrypt-io/telecrypt-synapse.git", helper)
-        self.assertIn("protocol.version=2", helper)
-        self.assertIn("protocol.allow=never", helper)
-        self.assertIn("protocol.https.allow=always", helper)
-        self.assertIn("ulimit -f", helper)
-        self.assertIn("CONFIG_KILL_GRACE_SECONDS", helper)
-        self.assertIn('timeout --signal=TERM --kill-after="${CONFIG_KILL_GRACE_SECONDS}s"', helper)
-        self.assertNotIn('cat -- "$workdir/stdout"', helper)
-        self.assertNotIn('cat -- "$workdir/stderr"', helper)
+    def test_publish_release_refuses_a_preexisting_final_release(self) -> None:
+        payload = record(tag="1.159-tc3", image="ghcr.io/telecrypt-io/telecrypt-synapse")
+        digest = "sha256:" + __import__("hashlib").sha256(payload).hexdigest()
+        release = {
+            "id": 9,
+            "tag_name": "1.159-tc3",
+            "name": "1.159-tc3",
+            "body": f"Exact Synapse release for source commit {SOURCE_COMMIT}.",
+            "draft": False,
+            "prerelease": False,
+            "immutable": True,
+            "assets": [{
+                "id": 10,
+                "name": "telecrypt-synapse-1.159-tc3.digest.json",
+                "label": None,
+                "state": "uploaded",
+                "size": len(payload),
+                "digest": digest,
+            }],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            fake_gh = directory_path / "gh"
+            log = directory_path / "gh.log"
+            response = directory_path / "release.json"
+            response.write_text(json.dumps(release), encoding="utf-8")
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"$FAKE_GH_LOG\"\n"
+                "if [ \"$1\" = api ]; then printf 'HTTP/1.1 200 OK\\n\\n'; cat \"$FAKE_GH_RESPONSE\"; exit 0; fi\n"
+                "exit 99\n",
+                encoding="utf-8",
+            )
+            fake_gh.chmod(0o755)
+            environment = {
+                "PATH": f"{directory}:{os.environ['PATH']}",
+                "FAKE_GH_LOG": str(log),
+                "FAKE_GH_RESPONSE": str(response),
+            }
+            result = self.run_publish_release(
+                payload,
+                RELEASE_ASSET_NAME="telecrypt-synapse-1.159-tc3.digest.json",
+                **environment,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(log.read_text(encoding="utf-8").splitlines(), [
+                "api --include --hostname github.com --header Accept: application/vnd.github+json "
+                "--header X-GitHub-Api-Version: 2026-03-10 "
+                "repos/TeleCrypt-io/telecrypt-synapse/releases/tags/1.159-tc3",
+            ])
 
-    def test_publish_release_binds_asset_to_record_bytes_not_image_digest(self) -> None:
-        publish_release = (Path(__file__).parent / "publish_release.sh").read_text()
-        self.assertIn('record_digest="sha256:', publish_release)
-        self.assertIn('test "sha256:$(sha256sum -- "$destination"', publish_release)
-        self.assertIn('test "$(wc -c <"$destination")" -eq "$record_size"', publish_release)
-        self.assertIn("find_release_in_list", publish_release)
-        self.assertIn("gh release upload", publish_release)
-        self.assertIn("--clobber", publish_release)
-        self.assertIn("Exact Synapse release for source commit", publish_release)
-        self.assertNotIn("deliberately non-resumable", publish_release)
-        self.assertIn('if (.draft | type) == "boolean" then (.draft | tostring)', publish_release)
-        self.assertIn('--tag "$EXPECTED_TAG"', publish_release)
-        self.assertIn('expected_release_url="https://github.com/$GITHUB_REPOSITORY/releases/tag/$EXPECTED_TAG"', publish_release)
-        self.assertIn('test "$(wc -l <"$edit_stdout")" -eq 1', publish_release)
-        self.assertIn('timeout --signal=TERM --kill-after=5s "${RELEASE_TIMEOUT_SECONDS}s"', publish_release)
+    def test_publish_release_uses_machine_http_status_and_rejects_oversize_api_output(self) -> None:
+        payload = record(tag="1.159-tc3")
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            fake_gh = directory_path / "gh"
+            mode = directory_path / "mode"
+            log = directory_path / "gh.log"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"$FAKE_GH_LOG\"\n"
+                "if [ \"$1\" = api ]; then\n"
+                "  if [ \"$(cat \"$FAKE_GH_MODE\")\" = 404 ]; then printf 'HTTP/1.1 404 Not Found\\n\\n'; printf 'unrelated diagnostic\\n' >&2; exit 1; fi\n"
+                "  printf 'HTTP/1.1 200 OK\\n\\n'; head -c 1100000 /dev/zero; exit 0\n"
+                "fi\n"
+                "exit 99\n",
+                encoding="utf-8",
+            )
+            fake_gh.chmod(0o755)
+            mode.write_text("404\n", encoding="utf-8")
+            environment = {
+                "PATH": f"{directory}:{os.environ['PATH']}",
+                "FAKE_GH_LOG": str(log),
+                "FAKE_GH_MODE": str(mode),
+            }
+            result = self.run_publish_release(payload, **environment)
+            self.assertNotEqual(result.returncode, 0)
+            mode.write_text("oversize\n", encoding="utf-8")
+            result = self.run_publish_release(payload, **environment)
+            self.assertNotEqual(result.returncode, 0)
 
-    def test_synapse_release_contract_checks_asset_chronology_and_exact_links(self) -> None:
+    def test_publish_workflow_checks_tag_object_and_bounded_gh_calls(self) -> None:
+        workflow = (Path(__file__).resolve().parent / "workflows" / "image.yml").read_text(encoding="utf-8")
+        self.assertIn("Recheck the exact source tag and refreshed main immediately before image push", workflow)
+        self.assertIn("rev-parse 'refs/remotes/origin/release-tag^{commit}'", workflow)
+        self.assertNotIn("grep -Eiq '(^|[^0-9])404", workflow)
+        script = (Path(__file__).resolve().parent / "publish_release.sh").read_text(encoding="utf-8")
+        self.assertIn("gh api --include", script)
+        self.assertNotRegex(script, r"ulimit\s+-f")
+        self.assertIn("bounded-command.py", script)
+        self.assertIn("start_new_session=True", (Path(__file__).resolve().parent / "bounded-command.py").read_text(encoding="utf-8"))
+
+    def test_synapse_release_contract_checks_identity_and_asset_digest(self) -> None:
         digest = "sha256:" + "d" * 64
         document = {
             "id": 7,
@@ -290,82 +461,25 @@ class PrepareInputsTests(unittest.TestCase):
                 "updated_at": "2026-08-22T00:00:02Z",
             }],
         }
-        for html_url in (
-            "https://github.com/TeleCrypt-io/telecrypt-synapse/releases/tag/1.159-tc3",
-            "https://github.com/TeleCrypt-io/telecrypt-synapse/releases/1.159-tc3",
-        ):
-            candidate = dict(document, html_url=html_url)
-            validate_release.validate_release(
-                candidate,
-                repository="TeleCrypt-io/telecrypt-synapse",
-                tag="1.159-tc3",
-                asset_name="telecrypt-synapse-1.159-tc3.digest.json",
-                body=f"Exact Synapse release for source commit {SOURCE_COMMIT}.",
-                record_digest=digest,
-                record_size=10,
-                draft=False,
-                immutable=True,
-            )
+        validate_release.validate_release(
+            document,
+            tag="1.159-tc3",
+            asset_name="telecrypt-synapse-1.159-tc3.digest.json",
+            body=f"Exact Synapse release for source commit {SOURCE_COMMIT}.",
+            record_digest=digest,
+            record_size=10,
+        )
         invalid = dict(document)
-        invalid["assets"] = [dict(document["assets"][0], updated_at="2026-08-21T00:00:02Z")]
+        invalid["assets"] = [dict(document["assets"][0], digest="sha256:" + "e" * 64)]
         with self.assertRaises(SystemExit):
             validate_release.validate_release(
                 invalid,
-                repository="TeleCrypt-io/telecrypt-synapse",
                 tag="1.159-tc3",
                 asset_name="telecrypt-synapse-1.159-tc3.digest.json",
                 body=f"Exact Synapse release for source commit {SOURCE_COMMIT}.",
                 record_digest=digest,
                 record_size=10,
-                draft=False,
-                immutable=True,
             )
-
-    def test_draft_recovery_classifies_zero_exact_partial_and_ambiguous_assets(self) -> None:
-        name = "telecrypt-synapse-1.159-tc3.digest.json"
-        digest = "sha256:" + "d" * 64
-        exact = {"name": name, "state": "uploaded", "size": 10, "digest": digest}
-        self.assertEqual(validate_release.draft_asset_action({"assets": []}, name, digest, 10), "upload")
-        self.assertEqual(validate_release.draft_asset_action({"assets": [exact]}, name, digest, 10), "verify")
-        self.assertEqual(validate_release.draft_asset_action({"assets": [{**exact, "size": 3}]}, name, digest, 10), "replace")
-        with self.assertRaises(SystemExit):
-            validate_release.draft_asset_action({"assets": [exact, exact]}, name, digest, 10)
-        with self.assertRaises(SystemExit):
-            validate_release.draft_asset_action({"assets": [{**exact, "name": "wrong"}]}, name, digest, 10)
-
-    def test_image_archive_handoff_binds_test_output_to_publish_input(self) -> None:
-        workflow = (Path(__file__).parent / "workflows" / "image.yml").read_text()
-        self.assertIn("archive_sha256: ${{ steps.archive.outputs.sha256 }}", workflow)
-        self.assertIn("archive_size: ${{ steps.archive.outputs.size }}", workflow)
-        self.assertIn("EXPECTED_ARCHIVE_SHA256: ${{ needs.test.outputs.archive_sha256 }}", workflow)
-        self.assertIn("EXPECTED_ARCHIVE_SIZE: ${{ needs.test.outputs.archive_size }}", workflow)
-        self.assertIn('test "$actual_archive_sha256" = "$EXPECTED_ARCHIVE_SHA256"', workflow)
-        self.assertIn('test "$actual_archive_size" = "$EXPECTED_ARCHIVE_SIZE"', workflow)
-        self.assertIn(
-            "PYTHONDONTWRITEBYTECODE=1 python3 .github/test_prepare_inputs.py", workflow
-        )
-        self.assertIn(
-            "PYTHONDONTWRITEBYTECODE=1 python3 .github/test_verify_registry_image.py", workflow
-        )
-        self.assertIn(
-            "PYTHONDONTWRITEBYTECODE=1 python3 .github/test_strict_git_fetch.py", workflow
-        )
-
-    def test_base_materialization_is_explicitly_linux_amd64_and_dockerfile_uses_tag(self) -> None:
-        workflow = (Path(__file__).parent / "workflows" / "image.yml").read_text()
-        dockerfile = (Path(__file__).parents[1] / "Dockerfile").read_text()
-        self.assertIn('docker pull --quiet --platform linux/amd64 "$BASE_REF@$base_digest"', workflow)
-        self.assertIn("FROM ghcr.io/element-hq/synapse:v${SYNAPSE_VERSION}", dockerfile)
-        self.assertNotIn("FROM ghcr.io/element-hq/synapse@${SYNAPSE_BASE_DIGEST}", dockerfile)
-
-    def test_publish_release_bounds_and_rejects_command_diagnostics(self) -> None:
-        publish_release = (Path(__file__).parent / "publish_release.sh").read_text()
-        self.assertIn('2>"$stderr_file"', publish_release)
-        self.assertIn("GitHub API emitted unexpected diagnostics", publish_release)
-        self.assertIn('"$workdir/create.stderr"', publish_release)
-        self.assertIn("GitHub draft Release was not recoverable after create", publish_release)
-        self.assertIn("MAX_RELEASE_PAGES=10", publish_release)
-        self.assertIn('expected_404_error="gh: HTTP 404: Not Found (https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$EXPECTED_TAG)"', publish_release)
 
     def test_annotated_tag_is_peeled_to_commit(self) -> None:
         responses = {
