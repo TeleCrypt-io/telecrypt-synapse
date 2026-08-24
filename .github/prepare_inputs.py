@@ -1,0 +1,567 @@
+#!/usr/bin/env python3
+"""Download and verify every non-base input before the offline image build."""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import hashlib
+import json
+import os
+import re
+import resource
+import selectors
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.request
+from urllib.parse import urljoin, urlsplit
+from pathlib import Path
+
+from validate_dependencies import MAX_FILE_BYTES, load_lock, validate_wheelhouse
+
+
+HEX_RE = re.compile(r"[0-9a-f]{64}\Z")
+GIT_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
+DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+RFC3339_RE = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z\Z"
+)
+VERSION_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
+DOWNLOAD_TIMEOUT_SECONDS = 60
+PIP_SUBPROCESS_TIMEOUT_SECONDS = 300
+MAX_PIP_OUTPUT_BYTES = 64 * 1024
+GITHUB_API_VERSION = "2026-03-10"
+GITHUB_API_ROOT = "https://api.github.com"
+CONTROLPLANE_REPOSITORY = "TeleCrypt-io/controlplane"
+CONTROLPLANE_IMAGE = "ghcr.io/telecrypt-io/controlplane"
+MAX_API_JSON_BYTES = 1024 * 1024
+MAX_DIGEST_JSON_BYTES = 64 * 1024
+MAX_TOTAL_INPUT_BYTES = 256 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 4096
+MAX_ARCHIVE_NAME_BYTES = 4096
+MAX_ARCHIVE_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
+ALLOWED_DOWNLOAD_HOSTS = frozenset(
+    {
+        "github.com",
+        "api.github.com",
+        "codeload.github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+    }
+)
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"prepare inputs: {message}")
+
+
+def limit_pip_file_size() -> None:
+    resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_FILE_BYTES, MAX_FILE_BYTES))
+
+
+def run_bounded_pip(command: list[str]) -> None:
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            preexec_fn=limit_pip_file_size,
+        )
+    except OSError as exc:
+        fail(f"could not start pip download: {exc}")
+
+    selector = selectors.DefaultSelector()
+    if process.stdout is None or process.stderr is None:
+        process.kill()
+        process.wait()
+        fail("pip download did not provide bounded output streams")
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    captured = {"stdout": bytearray(), "stderr": bytearray()}
+    overflow = False
+    deadline = time.monotonic() + PIP_SUBPROCESS_TIMEOUT_SECONDS
+    while selector.get_map():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            process.kill()
+            selector.close()
+            process.wait()
+            fail(f"pip download exceeded {PIP_SUBPROCESS_TIMEOUT_SECONDS} seconds")
+        for key, _ in selector.select(remaining):
+            chunk = os.read(key.fileobj.fileno(), 64 * 1024)
+            if not chunk:
+                selector.unregister(key.fileobj)
+                continue
+            stream = captured[key.data]
+            if len(stream) + len(chunk) > MAX_PIP_OUTPUT_BYTES:
+                overflow = True
+                process.kill()
+            elif not overflow:
+                stream.extend(chunk)
+    selector.close()
+    return_code = process.wait()
+    if overflow:
+        fail(f"pip download emitted more than {MAX_PIP_OUTPUT_BYTES} bytes of diagnostics")
+    if return_code != 0:
+        fail(f"pip download failed with exit code {return_code}")
+    if captured["stdout"] or captured["stderr"]:
+        fail("pip download emitted unexpected diagnostics")
+
+
+class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, file, code, message, headers, new_url):
+        target = urlsplit(urljoin(request.full_url, new_url))
+        if (
+            target.scheme != "https"
+            or target.hostname not in ALLOWED_DOWNLOAD_HOSTS
+            or target.username is not None
+            or target.password is not None
+            or target.port is not None
+            or target.fragment
+        ):
+            raise ValueError(f"redirect leaves the approved GitHub hosts: {target.geturl()}")
+        return super().redirect_request(request, file, code, message, headers, new_url)
+
+
+URL_OPENER = urllib.request.build_opener(SafeRedirectHandler)
+
+
+def validate_download_url(url: str, expected_host: str) -> None:
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != expected_host
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        fail(f"unexpected download URL: {url}")
+    if parsed.port is not None or parsed.fragment:
+        fail(f"unexpected download URL components: {url}")
+
+
+def download(
+    url: str,
+    destination: Path,
+    expected: str,
+    *,
+    expected_size: int | None = None,
+    max_bytes: int = MAX_FILE_BYTES,
+) -> None:
+    temporary: Path | None = None
+    try:
+        validate_download_url(url, "github.com")
+        if expected_size is not None and (expected_size <= 0 or expected_size > max_bytes):
+            raise ValueError(f"advertised size is outside the {max_bytes} byte file limit")
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=destination.parent, prefix=f".{destination.name}.", delete=False
+        ) as output:
+            temporary = Path(output.name)
+            digest = hashlib.sha256()
+            total_bytes = 0
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "Accept": "application/octet-stream",
+                    "User-Agent": "telecrypt-synapse-build",
+                },
+            )
+            with URL_OPENER.open(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
+                while chunk := response.read(1024 * 1024):
+                    total_bytes += len(chunk)
+                    if total_bytes > max_bytes:
+                        raise ValueError(f"download exceeds the {max_bytes} byte file limit")
+                    digest.update(chunk)
+                    output.write(chunk)
+        if expected_size is not None and total_bytes != expected_size:
+            fail(f"{destination.name} has size {total_bytes}, expected {expected_size}")
+        actual = digest.hexdigest()
+        if actual != expected:
+            fail(f"{destination.name} has digest {actual}, expected {expected}")
+        temporary.replace(destination)
+    except Exception as exc:
+        if isinstance(exc, SystemExit):
+            raise
+        fail(f"could not download or verify {destination.name}: {exc}")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def read_bounded(response, max_bytes: int) -> bytes:
+    body = bytearray()
+    while chunk := response.read(64 * 1024):
+        if len(body) + len(chunk) > max_bytes:
+            raise ValueError(f"response exceeds the {max_bytes} byte limit")
+        body.extend(chunk)
+    return bytes(body)
+
+
+def fetch_controlplane_api(endpoint: str, max_bytes: int) -> dict:
+    url = f"{GITHUB_API_ROOT}/repos/{CONTROLPLANE_REPOSITORY}/{endpoint}"
+    validate_download_url(url, "api.github.com")
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": GITHUB_API_VERSION,
+            "User-Agent": "telecrypt-synapse-build",
+        },
+    )
+    try:
+        with URL_OPENER.open(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
+            if response.geturl() != url:
+                fail(f"Controlplane API redirected unexpectedly: {response.geturl()}")
+            payload = read_bounded(response, max_bytes)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        fail(f"could not fetch Controlplane API metadata: {exc}")
+    try:
+        metadata = json.loads(payload)
+    except (UnicodeDecodeError, ValueError) as exc:
+        fail(f"Controlplane API metadata is not valid JSON: {exc}")
+    if not isinstance(metadata, dict):
+        fail("Controlplane API metadata is not an object")
+    return metadata
+
+
+def fetch_controlplane_release(release: str) -> dict:
+    metadata = fetch_controlplane_api(f"releases/tags/{release}", MAX_API_JSON_BYTES)
+    validate_controlplane_release(metadata, release)
+    return metadata
+
+
+def validate_controlplane_release(metadata: dict, release: str) -> None:
+    expected_api_root = f"{GITHUB_API_ROOT}/repos/{CONTROLPLANE_REPOSITORY}/releases"
+    expected_html_urls = {
+        f"https://github.com/{CONTROLPLANE_REPOSITORY}/releases/{release}",
+        f"https://github.com/{CONTROLPLANE_REPOSITORY}/releases/tag/{release}",
+    }
+    if (
+        metadata.get("tag_name") != release
+        or metadata.get("name") != release
+        or metadata.get("draft") is not False
+        or metadata.get("prerelease") is not False
+        or metadata.get("immutable") is not True
+        or not isinstance(metadata.get("id"), int)
+        or isinstance(metadata.get("id"), bool)
+        or metadata["id"] <= 0
+        or metadata.get("url")
+        != f"{expected_api_root}/{metadata.get('id')}"
+        or metadata.get("html_url") not in expected_html_urls
+        or metadata.get("body") != f"Exact Controlplane release {release}."
+        or metadata.get("assets_url")
+        != f"{expected_api_root}/{metadata.get('id')}/assets"
+        or metadata.get("upload_url")
+        != f"https://uploads.github.com/repos/{CONTROLPLANE_REPOSITORY}/releases/{metadata.get('id')}/assets{{?name,label}}"
+        or metadata.get("tarball_url")
+        != f"https://api.github.com/repos/{CONTROLPLANE_REPOSITORY}/tarball/{release}"
+        or metadata.get("zipball_url")
+        != f"https://api.github.com/repos/{CONTROLPLANE_REPOSITORY}/zipball/{release}"
+    ):
+        fail("Controlplane release metadata is not the exact immutable release contract")
+    def parse_timestamp(value: object, label: str) -> datetime.datetime:
+        if not isinstance(value, str) or not RFC3339_RE.fullmatch(value):
+            fail(f"Controlplane {label} has no valid UTC timestamp")
+        try:
+            parsed = datetime.datetime.fromisoformat(value[:-1] + "+00:00")
+        except ValueError:
+            fail(f"Controlplane {label} has no valid UTC timestamp")
+        if parsed.tzinfo != datetime.timezone.utc:
+            fail(f"Controlplane {label} is not UTC")
+        return parsed
+
+    created = parse_timestamp(metadata.get("created_at"), "release.created_at")
+    published = parse_timestamp(metadata.get("published_at"), "release.published_at")
+    if created > published:
+        fail("Controlplane release.created_at is after release.published_at")
+    assets = metadata.get("assets")
+    if not isinstance(assets, list):
+        fail("Controlplane release assets are not a list")
+    for asset in assets:
+        if not isinstance(asset, dict):
+            fail("Controlplane release contains a malformed asset entry")
+        asset_created = parse_timestamp(asset.get("created_at"), "asset.created_at")
+        asset_updated = parse_timestamp(asset.get("updated_at"), "asset.updated_at")
+        if not created <= asset_created <= asset_updated <= published:
+            fail("Controlplane release and asset timestamps are out of order")
+
+
+def fetch_controlplane_annotated_tag(release: str) -> tuple[str, str]:
+    ref = fetch_controlplane_api(f"git/ref/tags/{release}", MAX_API_JSON_BYTES)
+    api_root = f"{GITHUB_API_ROOT}/repos/{CONTROLPLANE_REPOSITORY}"
+    ref_object = ref.get("object")
+    if (
+        ref.get("ref") != f"refs/tags/{release}"
+        or ref.get("url") != f"{api_root}/git/refs/tags/{release}"
+        or not isinstance(ref_object, dict)
+        or ref_object.get("type") != "tag"
+        or ref_object.get("url") != f"{api_root}/git/tags/{ref_object.get('sha')}"
+    ):
+        fail("Controlplane release tag is not an annotated tag ref")
+    annotated_tag_sha = ref_object.get("sha")
+    if not isinstance(annotated_tag_sha, str) or not GIT_SHA_RE.fullmatch(annotated_tag_sha):
+        fail("Controlplane annotated tag ref has no exact tag-object SHA")
+
+    tag_object = fetch_controlplane_api(f"git/tags/{annotated_tag_sha}", MAX_API_JSON_BYTES)
+    if (
+        tag_object.get("type") != "tag"
+        or tag_object.get("sha") != annotated_tag_sha
+        or tag_object.get("tag") != release
+        or tag_object.get("url") != f"{api_root}/git/tags/{annotated_tag_sha}"
+    ):
+        fail("Controlplane annotated tag object has an unexpected tag name")
+    target = tag_object.get("object")
+    if not isinstance(target, dict) or target.get("type") != "commit":
+        fail("Controlplane annotated tag does not peel directly to a commit")
+    if target.get("url") != f"{api_root}/git/commits/{target.get('sha')}":
+        fail("Controlplane annotated tag commit URL is not exact")
+    source_commit = target.get("sha")
+    if not isinstance(source_commit, str) or not GIT_SHA_RE.fullmatch(source_commit):
+        fail("Controlplane annotated tag has no exact peeled source commit")
+    return annotated_tag_sha, source_commit
+
+
+def validate_controlplane_assets(
+    metadata: dict, release: str, wheel: str, expected_wheel_sha256: str
+) -> tuple[dict, dict]:
+    assets = metadata.get("assets")
+    if not isinstance(assets, list) or len(assets) != 2:
+        fail("Controlplane release must contain exactly the wheel and digest JSON assets")
+    if any(not isinstance(asset, dict) for asset in assets):
+        fail("Controlplane release contains a malformed asset entry")
+    names = [asset.get("name") for asset in assets]
+    if any(not isinstance(name, str) for name in names) or len(set(names)) != 2:
+        fail("Controlplane release assets must have two unique names")
+    expected_digest_name = f"controlplane-{release}.digest.json"
+    if set(names) != {wheel, expected_digest_name}:
+        fail("Controlplane release assets differ from the exact wheel and digest JSON pair")
+
+    found = {asset["name"]: asset for asset in assets}
+    wheel_asset = found[wheel]
+    digest_asset = found[expected_digest_name]
+    expected_wheel_url = (
+        f"https://github.com/{CONTROLPLANE_REPOSITORY}/releases/download/{release}/{wheel}"
+    )
+    expected_digest_url = (
+        f"https://github.com/{CONTROLPLANE_REPOSITORY}/releases/download/{release}/"
+        f"{expected_digest_name}"
+    )
+    for asset, expected_url, label in (
+        (wheel_asset, expected_wheel_url, "wheel"),
+        (digest_asset, expected_digest_url, "digest JSON"),
+    ):
+        if asset.get("state") != "uploaded":
+            fail(f"Controlplane {label} asset is not uploaded")
+        if "label" not in asset or asset.get("label") is not None:
+            fail(f"Controlplane {label} asset has an unexpected label")
+        if asset.get("browser_download_url") != expected_url:
+            fail(f"Controlplane {label} asset URL is not the exact release URL")
+        if (
+            not isinstance(asset.get("id"), int)
+            or isinstance(asset["id"], bool)
+            or asset["id"] <= 0
+        ):
+            fail(f"Controlplane {label} asset has no valid immutable API ID")
+        expected_api_url = (
+            f"{GITHUB_API_ROOT}/repos/{CONTROLPLANE_REPOSITORY}/releases/assets/{asset['id']}"
+        )
+        if asset.get("url") != expected_api_url:
+            fail(f"Controlplane {label} asset API URL is not exact")
+        if (
+            not isinstance(asset.get("size"), int)
+            or isinstance(asset["size"], bool)
+            or asset["size"] <= 0
+        ):
+            fail(f"Controlplane {label} asset has no valid size")
+        if not isinstance(asset.get("digest"), str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", asset["digest"]
+        ):
+            fail(f"Controlplane {label} asset has no exact SHA-256 API digest")
+    if wheel_asset["digest"] != f"sha256:{expected_wheel_sha256}":
+        fail("Controlplane wheel API digest differs from versions.env")
+    if wheel_asset["size"] > MAX_FILE_BYTES:
+        fail("Controlplane wheel API size exceeds the image input limit")
+    if digest_asset["size"] > MAX_DIGEST_JSON_BYTES:
+        fail("Controlplane digest JSON API size exceeds its limit")
+    return wheel_asset, digest_asset
+
+
+def validate_controlplane_digest(
+    path: Path, release: str, source_commit: str, annotated_tag_sha: str
+) -> None:
+    try:
+        with path.open("rb") as stream:
+            raw = read_bounded(stream, MAX_DIGEST_JSON_BYTES)
+        payload = json.loads(raw)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        fail(f"Controlplane digest JSON is not valid: {exc}")
+    expected_keys = {
+        "schema_version",
+        "image",
+        "tag",
+        "source_commit",
+        "annotated_tag_sha",
+        "digest",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected_keys:
+        fail("Controlplane digest JSON does not have the exact reviewed schema")
+    if raw != (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode():
+        fail("Controlplane digest JSON is not compact canonical JSON")
+    if payload["schema_version"] != 1 or isinstance(payload["schema_version"], bool):
+        fail("Controlplane digest JSON has an unsupported schema version")
+    if payload["image"] != CONTROLPLANE_IMAGE:
+        fail("Controlplane digest JSON has an unexpected image")
+    if payload["tag"] != release:
+        fail("Controlplane digest JSON has an unexpected release tag")
+    if payload["source_commit"] != source_commit:
+        fail("Controlplane digest JSON source commit differs from the annotated tag")
+    if payload["annotated_tag_sha"] != annotated_tag_sha:
+        fail("Controlplane digest JSON tag object differs from the annotated tag ref")
+    if not isinstance(payload["digest"], str) or not DIGEST_RE.fullmatch(payload["digest"]):
+        fail("Controlplane digest JSON does not contain an exact image digest")
+
+
+def validate_provider_build_contract(path: Path) -> None:
+    try:
+        with tarfile.open(path, mode="r:gz") as archive:
+            names = []
+            total_uncompressed_bytes = 0
+            for member_number, member in enumerate(archive, 1):
+                if member_number > MAX_ARCHIVE_MEMBERS:
+                    fail(f"provider source archive has more than {MAX_ARCHIVE_MEMBERS} members")
+                if len(member.name.encode("utf-8")) > MAX_ARCHIVE_NAME_BYTES:
+                    fail(f"provider source archive member name exceeds {MAX_ARCHIVE_NAME_BYTES} bytes")
+                if member.isfile():
+                    if member.size < 0:
+                        fail("provider source archive contains a negative file size")
+                    total_uncompressed_bytes += member.size
+                    if total_uncompressed_bytes > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
+                        fail(
+                            "provider source archive exceeds the "
+                            f"{MAX_ARCHIVE_UNCOMPRESSED_BYTES} byte uncompressed limit"
+                        )
+                    names.append(member.name)
+    except (OSError, EOFError, tarfile.TarError) as exc:
+        fail(f"provider source archive is not readable: {exc}")
+
+    setup_files = [name for name in names if name.endswith("/setup.py") or name == "setup.py"]
+    pyproject_files = [
+        name for name in names if name.endswith("/pyproject.toml") or name == "pyproject.toml"
+    ]
+    if len(setup_files) != 1 or pyproject_files:
+        fail(
+            "provider source archive must expose exactly one setup.py and no pyproject.toml "
+            "for the reviewed base setuptools build contract"
+        )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--lock", type=Path, default=Path("s3-provider.lock"))
+    parser.add_argument("--s3-provider-version", required=True)
+    parser.add_argument("--s3-provider-archive-sha256", required=True)
+    parser.add_argument("--controlplane-release", required=True)
+    parser.add_argument("--controlplane-wheel-sha256", required=True)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    if not VERSION_RE.fullmatch(args.s3_provider_version):
+        fail("S3 provider version is not an exact numeric release")
+    if not VERSION_RE.fullmatch(args.controlplane_release):
+        fail("Controlplane release is not an exact numeric release")
+    for name, value in (
+        ("S3 provider archive", args.s3_provider_archive_sha256),
+        ("Controlplane wheel", args.controlplane_wheel_sha256),
+    ):
+        if not HEX_RE.fullmatch(value):
+            fail(f"{name} SHA-256 must be lowercase hexadecimal")
+
+    expected = load_lock(args.lock)
+    if args.output.exists() and any(args.output.iterdir()):
+        fail(f"output directory is not empty: {args.output}")
+    args.output.mkdir(parents=True, exist_ok=True)
+    wheelhouse = args.output / "wheelhouse"
+    wheelhouse.mkdir()
+
+    run_bounded_pip(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "download",
+            "--disable-pip-version-check",
+            "--quiet",
+            "--root-user-action=ignore",
+            "--no-cache-dir",
+            "--only-binary=:all:",
+            "--no-deps",
+            "--require-hashes",
+            "--timeout",
+            str(DOWNLOAD_TIMEOUT_SECONDS),
+            "--index-url",
+            "https://pypi.org/simple",
+            "--dest",
+            str(wheelhouse),
+            "--requirement",
+            str(args.lock),
+        ]
+    )
+    validate_wheelhouse(wheelhouse, expected)
+
+    archive = f"synapse-s3-storage-provider-{args.s3_provider_version}.tar.gz"
+    archive_url = (
+        "https://github.com/matrix-org/synapse-s3-storage-provider/"
+        f"archive/refs/tags/v{args.s3_provider_version}.tar.gz"
+    )
+    download(archive_url, args.output / archive, args.s3_provider_archive_sha256)
+    validate_provider_build_contract(args.output / archive)
+
+    wheel = f"telecrypt_tier_controller-{args.controlplane_release}-py3-none-any.whl"
+    metadata = fetch_controlplane_release(args.controlplane_release)
+    annotated_tag_sha, source_commit = fetch_controlplane_annotated_tag(args.controlplane_release)
+    wheel_asset, digest_asset = validate_controlplane_assets(
+        metadata, args.controlplane_release, wheel, args.controlplane_wheel_sha256
+    )
+    digest_name = digest_asset["name"]
+    download(
+        digest_asset["browser_download_url"],
+        args.output / digest_name,
+        digest_asset["digest"][len("sha256:") :],
+        expected_size=digest_asset["size"],
+        max_bytes=MAX_DIGEST_JSON_BYTES,
+    )
+    validate_controlplane_digest(
+        args.output / digest_name,
+        args.controlplane_release,
+        source_commit,
+        annotated_tag_sha,
+    )
+    download(
+        wheel_asset["browser_download_url"],
+        args.output / wheel,
+        args.controlplane_wheel_sha256,
+        expected_size=wheel_asset["size"],
+    )
+    total_input_bytes = 0
+    for item in args.output.rglob("*"):
+        if item.is_symlink():
+            fail(f"release inputs contain an unexpected symlink: {item}")
+        if item.is_file():
+            try:
+                total_input_bytes += item.stat().st_size
+            except OSError as exc:
+                fail(f"could not stat release input {item}: {exc}")
+    if total_input_bytes > MAX_TOTAL_INPUT_BYTES:
+        fail(f"release inputs exceed the {MAX_TOTAL_INPUT_BYTES} byte total limit")
+    print(f"prepared and verified {len(expected) + 3} exact image inputs")
+
+
+if __name__ == "__main__":
+    main()
