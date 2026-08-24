@@ -215,21 +215,31 @@ class PrepareInputsTests(unittest.TestCase):
 
     def test_strict_git_fetch_sanitizes_ambient_git_configuration(self) -> None:
         helper = (Path(__file__).parent / "strict_git_fetch.sh").read_text()
-        self.assertIn("export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null", helper)
-        self.assertIn("export GIT_CONFIG_COUNT=0 GIT_TERMINAL_PROMPT=0", helper)
+        self.assertIn("export GIT_CONFIG_NOSYSTEM=1", helper)
+        self.assertIn("export GIT_CONFIG_SYSTEM=/dev/null", helper)
+        self.assertIn("export GIT_CONFIG_GLOBAL=/dev/null", helper)
+        self.assertIn("export GIT_CONFIG_COUNT=0", helper)
+        self.assertIn("export GIT_TERMINAL_PROMPT=0", helper)
         self.assertIn("GIT_CONFIG_PARAMETERS", helper)
-        self.assertIn("GIT_ASKPASS SSH_ASKPASS GIT_SSH GIT_SSH_COMMAND GIT_PROXY_COMMAND", helper)
-        self.assertIn("HTTP_PROXY HTTPS_PROXY ALL_PROXY", helper)
-        self.assertIn("GIT_SSL_NO_VERIFY GIT_SSL_VERSION GIT_SSL_CIPHER_LIST", helper)
-        self.assertIn("for config_scope in --local --worktree", helper)
-        self.assertIn("url.*|http.*|credential.*|include*|core.ssh*|core.gitproxy", helper)
-        self.assertIn("remote.*.uploadpack|remote.*.proxy", helper)
+        for variable in ("GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND"):
+            self.assertIn(variable, helper)
+        for variable in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+            self.assertIn(variable, helper)
+        for variable in ("GIT_SSL_NO_VERIFY", "GIT_SSL_VERSION", "GIT_SSL_CIPHER_LIST"):
+            self.assertIn(variable, helper)
+        self.assertIn('config "$scope"', helper)
+        self.assertIn("config --file", helper)
+        for pattern in ("url(\\..*)?", "http(\\..*)?", "credential(\\..*)?", "include(\\..*)?"):
+            self.assertIn(pattern, helper)
+        self.assertIn("core\\.(askpass|ssh.*|gitproxy", helper)
+        self.assertIn("remote\\..*\\.(pushurl|vcs|uploadpack|proxy", helper)
         self.assertIn("https://github.com/TeleCrypt-io/telecrypt-synapse.git", helper)
         self.assertIn("protocol.version=2", helper)
         self.assertIn("protocol.allow=never", helper)
         self.assertIn("protocol.https.allow=always", helper)
         self.assertIn("ulimit -f", helper)
-        self.assertIn("timeout --signal=TERM --kill-after=5s", helper)
+        self.assertIn("CONFIG_KILL_GRACE_SECONDS", helper)
+        self.assertIn('timeout --signal=TERM --kill-after="${CONFIG_KILL_GRACE_SECONDS}s"', helper)
         self.assertNotIn('cat -- "$workdir/stdout"', helper)
         self.assertNotIn('cat -- "$workdir/stderr"', helper)
 

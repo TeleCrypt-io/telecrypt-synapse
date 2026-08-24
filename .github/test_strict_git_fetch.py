@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline tests for bounded, sanitized Git fetch diagnostics."""
+"""Offline tests for the bounded, sanitized Git transport boundary."""
 
 from __future__ import annotations
 
@@ -14,114 +14,100 @@ from pathlib import Path
 HELPER = Path(__file__).resolve().parent / "strict_git_fetch.sh"
 
 
-def write_fake_git(path: Path) -> None:
-    path.write_text(
-        """#!/bin/sh
-set -eu
-if [ "${1:-}" = config ]; then
-  exit 0
-fi
-if [ "${FAKE_GIT_MODE:-}" = overflow ]; then
-  yes SECRET_OVERFLOW | head -c 131072 >&2
-  exit 0
-fi
-if [ "${FAKE_GIT_MODE:-}" = successful-stderr ]; then
-  printf 'SECRET_SUCCESS_STDERR\\n' >&2
-  exit 0
-fi
-if [ "${FAKE_GIT_MODE:-}" = environment-check ] && [ "${1:-}" = -c ]; then
-  test "${GIT_CONFIG_COUNT:-}" = 0
-  test "${GIT_CONFIG_PARAMETERS+x}" != x
-  test "${GIT_CONFIG_KEY_0+x}" != x
-  test "${GIT_CONFIG_VALUE_0+x}" != x
-  for variable in \
-    GIT_ASKPASS SSH_ASKPASS GIT_SSH GIT_SSH_COMMAND GIT_PROXY_COMMAND \
-    SSH_AUTH_SOCK SSH_AGENT_PID HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy \
-    https_proxy all_proxy NO_PROXY no_proxy GIT_HTTP_PROXY_AUTHMETHOD \
-    GIT_SSL_NO_VERIFY GIT_SSL_VERSION GIT_SSL_CIPHER_LIST GIT_SSL_CAINFO \
-    GIT_SSL_CAPATH GIT_SSL_CERT GIT_SSL_KEY CURL_CA_BUNDLE SSL_CERT_FILE \
-    SSL_CERT_DIR REQUESTS_CA_BUNDLE NODE_EXTRA_CA_CERTS AWS_CA_BUNDLE \
-    GIT_ALLOW_PROTOCOL; do
-    eval 'test "${'"$variable"'+x}" != x'
-  done
-  test "$2" = protocol.version=2
-  test "$4" = protocol.allow=never
-  test "$6" = protocol.https.allow=always
-  test "$8" = credential.helper=
-  test "${10}" = credential.useHttpPath=false
-  test "${12}" = http.sslVerify=true
-  test "${13}" = fetch
-  test "${17}" = https://github.com/TeleCrypt-io/telecrypt-synapse.git
-  exit 0
-fi
-exit 0
-""",
-        encoding="utf-8",
+def init_repo() -> Path:
+    root = Path(tempfile.mkdtemp(prefix="synapse-git-transport-"))
+    result = subprocess.run(["/usr/bin/git", "init", "--quiet", str(root)], capture_output=True, text=True)
+    if result.returncode:
+        raise AssertionError(result.stderr)
+    return root
+
+
+def run_helper(root: Path, *arguments: str, **overrides: str) -> subprocess.CompletedProcess[str]:
+    environment = {**os.environ, **overrides}
+    return subprocess.run(
+        ["/bin/bash", str(HELPER), *arguments],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
     )
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
 class StrictGitFetchTests(unittest.TestCase):
-    def run_helper(self, mode: str) -> subprocess.CompletedProcess[str]:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            fake_git = root / "git"
-            write_fake_git(fake_git)
-            return subprocess.run(
-                ["bash", str(HELPER), "refs/heads/main:refs/remotes/origin/main"],
-                cwd=root,
-                env={
-                    **os.environ,
-                    "PATH": f"{root}:{os.environ['PATH']}",
-                    "FAKE_GIT_MODE": mode,
-                },
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
+    def test_static_boundary_uses_trusted_git_and_canonical_https(self) -> None:
+        helper = HELPER.read_text(encoding="utf-8")
+        for required in (
+            "TRUSTED_GIT='/usr/bin/git'",
+            "CANONICAL_URL='https://github.com/TeleCrypt-io/telecrypt-synapse.git'",
+            "GIT_CONFIG_SYSTEM=/dev/null",
+            "GIT_CONFIG_GLOBAL=/dev/null",
+            "GIT_CONFIG_COUNT=0",
+            "GIT_CONFIG_PARAMETERS=",
+            "GIT_ASKPASS=",
+            "GIT_SSH_COMMAND=",
+            "HTTPS_PROXY=",
+            "GIT_SSL_NO_VERIFY=",
+            "GIT_DIR",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_INDEX_FILE",
+            "GIT_NAMESPACE",
+            "GIT_REPLACE_REF_BASE",
+            "GIT_EXEC_PATH",
+            "core.askpass",
+            "protocol.version=2",
+            "protocol.https.allow=always",
+            "credential.helper=",
+            "core.sshCommand=",
+            "core.gitproxy=",
+            "remote\\..*\\.(uploadpack|proxy)",
+            "--no-includes",
+            "local-read",
+            "local-ancestor",
+        ):
+            self.assertIn(required, helper)
+
+    def test_hostile_process_environment_is_cleared_for_local_checks(self) -> None:
+        root = init_repo()
+        try:
+            result = run_helper(
+                root,
+                "check",
+                GIT_CONFIG_COUNT="2",
+                GIT_CONFIG_KEY_0="http.proxy",
+                GIT_CONFIG_VALUE_0="http://evil.invalid",
+                GIT_CONFIG_KEY_1="credential.helper",
+                GIT_CONFIG_VALUE_1="!printf hostile",
+                GIT_CONFIG_PARAMETERS="'http.proxy=http://evil.invalid'",
+                GIT_DIR="/tmp/hostile-git-dir",
+                GIT_COMMON_DIR="/tmp/hostile-common-dir",
+                GIT_OBJECT_DIRECTORY="/tmp/hostile-objects",
+                GIT_ALTERNATE_OBJECT_DIRECTORIES="/tmp/hostile-alternates",
+                GIT_INDEX_FILE="/tmp/hostile-index",
+                GIT_NAMESPACE="hostile",
+                GIT_REPLACE_REF_BASE="refs/replace/hostile",
+                GIT_EXEC_PATH="/tmp/hostile-exec",
+                GIT_ASKPASS="/tmp/hostile-askpass",
+                SSH_ASKPASS="/tmp/hostile-ssh-askpass",
+                GIT_SSH_COMMAND="ssh -oProxyCommand=hostile",
+                HTTPS_PROXY="http://secret.invalid",
+                GIT_SSL_NO_VERIFY="1",
             )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            subprocess.run(["rm", "-rf", str(root)], check=True)
 
-    def test_overflow_fails_without_leaking_captured_output(self) -> None:
-        result = self.run_helper("overflow")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn("SECRET_OVERFLOW", result.stderr)
-
-    def test_successful_stderr_fails_without_leaking_captured_output(self) -> None:
-        result = self.run_helper("successful-stderr")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("git fetch emitted unexpected diagnostics", result.stderr)
-        self.assertNotIn("SECRET_SUCCESS_STDERR", result.stderr)
-
-    def test_fetch_uses_canonical_https_and_clears_ambient_transport_controls(self) -> None:
-        result = self.run_helper_with_environment(
-            "environment-check",
-            {
-                "GIT_CONFIG_COUNT": "1",
-                "GIT_CONFIG_KEY_0": "credential.helper",
-                "GIT_CONFIG_VALUE_0": "!printf hostile",
-                "GIT_CONFIG_PARAMETERS": "'credential.helper=!printf hostile'",
-                "GIT_ASKPASS": "/tmp/askpass",
-                "SSH_ASKPASS": "/tmp/ssh-askpass",
-                "GIT_SSH": "/tmp/ssh",
-                "GIT_SSH_COMMAND": "ssh -o ProxyCommand=hostile",
-                "GIT_PROXY_COMMAND": "/tmp/proxy",
-                "SSH_AUTH_SOCK": "/tmp/agent.sock",
-                "HTTP_PROXY": "http://proxy.invalid",
-                "HTTPS_PROXY": "http://proxy.invalid",
-                "ALL_PROXY": "http://proxy.invalid",
-                "http_proxy": "http://proxy.invalid",
-                "https_proxy": "http://proxy.invalid",
-                "all_proxy": "http://proxy.invalid",
-                "NO_PROXY": "*",
-                "GIT_SSL_NO_VERIFY": "1",
-                "GIT_SSL_VERSION": "SSLv3",
-                "GIT_SSL_CAINFO": "/tmp/ca.pem",
-                "CURL_CA_BUNDLE": "/tmp/ca.pem",
-                "SSL_CERT_FILE": "/tmp/ca.pem",
-                "GIT_ALLOW_PROTOCOL": "file:ssh",
-            },
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
+    def test_option_shaped_refspec_is_rejected_before_transport(self) -> None:
+        root = init_repo()
+        try:
+            result = run_helper(root, "--upload-pack=/tmp/secret-capture")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("unsupported operation", result.stderr)
+        finally:
+            subprocess.run(["rm", "-rf", str(root)], check=True)
 
     def test_forbidden_local_and_worktree_configuration_is_rejected(self) -> None:
         forbidden = (
@@ -129,76 +115,98 @@ class StrictGitFetchTests(unittest.TestCase):
             ("http.proxy", "http://evil.example"),
             ("credential.helper", "!echo hostile"),
             ("include.path", "/tmp/hostile-gitconfig"),
+            ("core.askPass", "/tmp/askpass"),
             ("core.sshCommand", "ssh -o ProxyCommand=hostile"),
             ("core.gitProxy", "git-proxy"),
+            ("core.worktree", "/tmp/hostile-worktree"),
+            ("remote.origin.pushurl", "https://evil.example/push.git"),
+            ("remote.origin.vcs", "ssh"),
             ("remote.origin.uploadpack", "hostile-upload-pack"),
             ("remote.origin.proxy", "hostile-proxy"),
         )
         for scope in ("--local", "--worktree"):
             for key, value in forbidden:
                 with self.subTest(scope=scope, key=key):
-                    with tempfile.TemporaryDirectory() as directory:
-                        root = Path(directory)
-                        subprocess.run(
-                            ["git", "init", "-q", str(root)],
-                            check=True,
-                            capture_output=True,
-                        )
+                    root = init_repo()
+                    try:
                         if scope == "--worktree":
                             subprocess.run(
-                                [
-                                    "git",
-                                    "-C",
-                                    str(root),
-                                    "config",
-                                    "--local",
-                                    "extensions.worktreeConfig",
-                                    "true",
-                                ],
+                                ["/usr/bin/git", "-C", str(root), "config", "--local",
+                                 "extensions.worktreeConfig", "true"],
                                 check=True,
                             )
-                        subprocess.run(
-                            ["git", "-C", str(root), "config", scope, key, value],
-                            check=True,
-                            capture_output=True,
-                        )
                         result = subprocess.run(
-                            [
-                                "bash",
-                                str(HELPER),
-                                "refs/heads/main:refs/remotes/origin/main",
-                            ],
-                            cwd=root,
-                            env={**os.environ, "PATH": os.environ["PATH"]},
+                            ["/usr/bin/git", "-C", str(root), "config", scope, key, value],
                             capture_output=True,
                             text=True,
-                            timeout=10,
-                            check=False,
                         )
-                        self.assertNotEqual(result.returncode, 0)
-                        self.assertIn("forbidden Git", result.stderr)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        checked = run_helper(root, "check")
+                        self.assertNotEqual(checked.returncode, 0)
+                        self.assertIn("unsafe transport key", checked.stderr)
+                    finally:
+                        subprocess.run(["rm", "-rf", str(root)], check=True)
 
-    def run_helper_with_environment(
-        self, mode: str, overrides: dict[str, str]
-    ) -> subprocess.CompletedProcess[str]:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+    def test_oversized_and_fifo_config_are_rejected_without_hanging(self) -> None:
+        root = init_repo()
+        try:
+            config_path = root / ".git" / "config"
+            with config_path.open("ab") as stream:
+                stream.write(b"\n" + b"[hostile]\nvalue = " + b"x" * (70 * 1024))
+            oversized = run_helper(root, "check")
+            self.assertNotEqual(oversized.returncode, 0)
+            self.assertIn("bounded input", oversized.stderr)
+
+            subprocess.run(["/usr/bin/git", "-C", str(root), "init", "--quiet"], check=True)
+            config_path.unlink()
+            os.mkfifo(config_path)
+            fifo = run_helper(root, "check")
+            self.assertNotEqual(fifo.returncode, 0)
+            self.assertIn("regular file", fifo.stderr)
+        finally:
+            subprocess.run(["rm", "-rf", str(root)], check=True)
+
+    def test_hostile_git_and_remote_helper_cannot_capture_transport_environment(self) -> None:
+        root = init_repo()
+        try:
+            marker = root / "captured"
             fake_git = root / "git"
-            write_fake_git(fake_git)
-            return subprocess.run(
-                ["bash", str(HELPER), "refs/heads/main:refs/remotes/origin/main"],
-                cwd=root,
-                env={
-                    **os.environ,
-                    "PATH": f"{root}:{os.environ['PATH']}",
-                    "FAKE_GIT_MODE": mode,
-                    **overrides,
-                },
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
+            fake_remote = root / "git-remote-https"
+            for executable in (fake_git, fake_remote):
+                executable.write_text(
+                    "#!/bin/sh\nprintf '%s\n' \"$" + "{HTTPS_PROXY:-}\" > '" + str(marker) + "'\nexit 99\n",
+                    encoding="utf-8",
+                )
+                executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+            result = run_helper(
+                root,
+                "check",
+                PATH=f"{root}:{os.environ['PATH']}",
+                GIT_EXEC_PATH=str(root),
+                HTTPS_PROXY="https://secret.invalid",
+                GIT_ASKPASS=str(fake_git),
             )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(marker.exists(), "hostile Git executable or remote helper ran")
+        finally:
+            subprocess.run(["rm", "-rf", str(root)], check=True)
+
+    def test_local_read_and_ancestor_share_the_sanitized_boundary(self) -> None:
+        root = init_repo()
+        try:
+            subprocess.run(["/usr/bin/git", "-C", str(root), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["/usr/bin/git", "-C", str(root), "config", "user.name", "Test"], check=True)
+            (root / "README").write_text("fixture\n", encoding="utf-8")
+            subprocess.run(["/usr/bin/git", "-C", str(root), "add", "README"], check=True)
+            subprocess.run(["/usr/bin/git", "-C", str(root), "commit", "--quiet", "-m", "fixture"], check=True)
+            commit = subprocess.check_output(["/usr/bin/git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+            read = run_helper(root, "local-read", "rev-parse", "HEAD", GIT_DIR="/tmp/evil")
+            self.assertEqual(read.returncode, 0, read.stderr)
+            self.assertEqual(read.stdout.strip(), commit)
+            ancestor = run_helper(root, "local-ancestor", commit, "HEAD")
+            self.assertEqual(ancestor.returncode, 0, ancestor.stderr)
+        finally:
+            subprocess.run(["rm", "-rf", str(root)], check=True)
 
 
 if __name__ == "__main__":
