@@ -138,6 +138,16 @@ class StrictGitFetchTests(unittest.TestCase):
         result = self.run_helper("check", GIT_CONFIG_SYSTEM="/tmp/hostile", GIT_CONFIG_GLOBAL="/tmp/hostile")
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_accepts_github_canonical_remote_with_or_without_git_suffix(self) -> None:
+        for remote in (
+            "https://github.com/TeleCrypt-io/telecrypt-synapse.git",
+            "https://github.com/TeleCrypt-io/telecrypt-synapse",
+        ):
+            git(self.root, "config", "--local", "remote.origin.url", remote)
+            result = self.run_helper("local-read", "rev-parse", "HEAD")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            git(self.root, "config", "--local", "--unset-all", "remote.origin.url")
+
     def test_git_boundary_does_not_use_file_size_rlimit(self) -> None:
         helper = HELPER.read_text(encoding="utf-8")
         self.assertNotRegex(helper, r"ulimit\s+-f")
