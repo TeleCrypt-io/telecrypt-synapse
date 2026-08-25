@@ -59,12 +59,13 @@ bounded_command() {
   shift 4
   (( max_bytes > 0 && max_bytes % 1024 == 0 )) || return 64
   rm -f -- "$output" "$stderr"
-  set +e
-  /usr/bin/python3 "$(dirname -- "${BASH_SOURCE[0]}")/bounded-command.py" \
+  if /usr/bin/python3 "$(dirname -- "${BASH_SOURCE[0]}")/bounded-command.py" \
     --stdout-limit "$max_bytes" --stderr-limit "$max_bytes" \
-    --stdout-path "$output" --stderr-path "$stderr" --timeout "$timeout_seconds" -- "$@"
-  status=$?
-  set -e
+    --stdout-path "$output" --stderr-path "$stderr" --timeout "$timeout_seconds" -- "$@"; then
+    status=0
+  else
+    status=$?
+  fi
   if [[ "$status" -eq 0 && -s "$stderr" ]]; then
     cat -- "$stderr" >&2
     return 1
@@ -177,7 +178,10 @@ check_draft() {
 }
 
 if get_release; then
-  check_draft
+  if ! check_draft; then
+    echo 'pre-existing release does not match the exact recoverable draft contract' >&2
+    exit 1
+  fi
 else
   status=$?
   test "$status" = 4
@@ -190,12 +194,22 @@ else
     --field "name=$EXPECTED_TAG" --field "body=$RELEASE_BODY" \
     --field draft=true --field prerelease=false \
     "repos/$REPOSITORY/releases"
+  create_status=$?
   set -e
-  # A client timeout can follow a successful server-side create. Re-fetch and continue only
-  # when the exact draft is present; a final release or an ambiguous response fails closed.
-  get_release || exit 1
-  test ! -s "$release_json.create.error"
-  check_draft
+  if ! get_release; then
+    cat -- "$release_json.create.log" "$release_json.create.error" >&2
+    echo 'release draft could not be read back after creation' >&2
+    exit 1
+  fi
+  if [[ "$create_status" -ne 0 || -s "$release_json.create.error" ]]; then
+    cat -- "$release_json.create.log" "$release_json.create.error" >&2
+    printf 'release draft creation failed (status %s)\n' "$create_status" >&2
+    exit 1
+  fi
+  if ! check_draft; then
+    echo 'created release draft does not match the exact empty-draft contract' >&2
+    exit 1
+  fi
 fi
 
 asset_count="$(jq -er '.assets|length' "$release_json")"
@@ -210,26 +224,45 @@ if [[ "$asset_count" -eq 0 ]]; then
       "https://uploads.github.com/repos/$REPOSITORY/releases/$release_id/assets?name=$RELEASE_ASSET_NAME"
   upload_status=$?
   set -e
-  test ! -s "$release_json.upload.error"
-  get_release
+  if [[ "$upload_status" -ne 0 || -s "$release_json.upload.error" ]]; then
+    cat -- "$release_json.upload.log" "$release_json.upload.error" >&2
+    printf 'release asset upload failed (status %s)\n' "$upload_status" >&2
+    exit 1
+  fi
 fi
-get_release
-check_draft
-asset_id="$(jq -er --arg asset "$RELEASE_ASSET_NAME" \
-  '.assets | select(length == 1) | .[0] | select(.name == $asset) | .id | select(type == "number" and . > 0 and . == floor)' "$release_json")"
-[[ "$asset_id" =~ ^[1-9][0-9]*$ ]]
-bounded_command "$MAX_ASSET_BYTES" "$downloaded_asset" "$release_error" 120 \
-gh api --hostname github.com --header 'Accept: application/octet-stream' \
-  --header "X-GitHub-Api-Version: $GH_API_VERSION" \
-  "repos/$REPOSITORY/releases/assets/$asset_id"
-test "$(wc -c <"$downloaded_asset")" -le "$MAX_ASSET_BYTES"
-cmp "$RELEASE_RECORD" "$downloaded_asset"
-test "$(wc -c <"$downloaded_asset")" = "$record_size"
-test "sha256:$(sha256sum "$downloaded_asset" | awk '{print $1}')" = "$record_digest"
-if [[ "${upload_status:-0}" -ne 0 ]]; then
-  test ! -s "$release_json.upload.error"
+if ! get_release; then
+  cat -- "$release_error" >&2
+  echo 'release draft could not be read back after asset upload' >&2
+  exit 1
 fi
-
+if ! check_draft; then
+  echo 'release draft differs from the exact pre-publication contract' >&2
+  exit 1
+fi
+if ! jq -e '(.assets | length) == 1' "$release_json" >/dev/null; then
+  echo 'release draft does not contain the exact uploaded asset' >&2
+  exit 1
+fi
+if ! asset_id="$(jq -er --arg asset "$RELEASE_ASSET_NAME" \
+  '.assets | select(length == 1) | .[0] | select(.name == $asset) | .id | select(type == "number" and . > 0 and . == floor)' "$release_json")"; then
+  echo 'release draft asset has no valid numeric id' >&2
+  exit 1
+fi
+if ! bounded_command "$MAX_ASSET_BYTES" "$downloaded_asset" "$release_error" 120 \
+  gh api --hostname github.com --header 'Accept: application/octet-stream' \
+    --header "X-GitHub-Api-Version: $GH_API_VERSION" \
+    "repos/$REPOSITORY/releases/assets/$asset_id"; then
+  cat -- "$release_error" >&2
+  echo 'release draft asset could not be downloaded for verification' >&2
+  exit 1
+fi
+if ! test "$(wc -c <"$downloaded_asset")" -le "$MAX_ASSET_BYTES" \
+  || ! cmp "$RELEASE_RECORD" "$downloaded_asset" \
+  || ! test "$(wc -c <"$downloaded_asset")" = "$record_size" \
+  || ! test "sha256:$(sha256sum "$downloaded_asset" | awk '{print $1}')" = "$record_digest"; then
+  echo 'downloaded draft asset differs from the exact release record' >&2
+  exit 1
+fi
 set +e
 bounded_command "$MAX_COMMAND_BYTES" "$release_json.edit.log" "$release_json.edit.error" 60 \
 gh api --include --hostname github.com --method PATCH \
@@ -239,24 +272,35 @@ gh api --include --hostname github.com --method PATCH \
   --field "body=$RELEASE_BODY" "repos/$REPOSITORY/releases/$release_id"
 edit_status=$?
 set -e
-test ! -s "$release_json.edit.error"
-get_release
+if ! get_release; then
+  cat -- "$release_json.edit.log" "$release_json.edit.error" "$release_error" >&2
+  printf 'published release could not be read back after PATCH (status %s)\n' "$edit_status" >&2
+  exit 1
+fi
 numeric_release_id="$release_id"
 jq -e --argjson release_id "$numeric_release_id" '.id == $release_id' "$release_json" >/dev/null
 
-env EXPECTED_TAG="$EXPECTED_TAG" RELEASE_ASSET_NAME="$RELEASE_ASSET_NAME" \
+if ! env EXPECTED_TAG="$EXPECTED_TAG" RELEASE_ASSET_NAME="$RELEASE_ASSET_NAME" \
   RELEASE_BODY="$RELEASE_BODY" RECORD_DIGEST="$record_digest" RECORD_SIZE="$record_size" \
-  PYTHONDONTWRITEBYTECODE=1 python3 .github/validate_release.py "$release_json"
+  PYTHONDONTWRITEBYTECODE=1 python3 .github/validate_release.py "$release_json"; then
+  cat -- "$release_json.edit.log" "$release_json.edit.error" >&2
+  printf 'release publication failed after PATCH (status %s)\n' "$edit_status" >&2
+  exit 1
+fi
 asset_id="$(jq -er '.assets[0].id | select(type == "number" and . > 0 and . == floor)' "$release_json")"
 [[ "$asset_id" =~ ^[1-9][0-9]*$ ]]
-bounded_command "$MAX_ASSET_BYTES" "$downloaded_asset" "$release_error" 120 \
-gh api --hostname github.com --header 'Accept: application/octet-stream' \
-  --header "X-GitHub-Api-Version: $GH_API_VERSION" \
-  "repos/$REPOSITORY/releases/assets/$asset_id"
-test "$(wc -c <"$downloaded_asset")" -le "$MAX_ASSET_BYTES"
-cmp "$RELEASE_RECORD" "$downloaded_asset"
-test "$(wc -c <"$downloaded_asset")" = "$record_size"
-test "sha256:$(sha256sum "$downloaded_asset" | awk '{print $1}')" = "$record_digest"
-if [[ "${edit_status:-0}" -ne 0 ]]; then
-  test ! -s "$release_json.edit.error"
+if ! bounded_command "$MAX_ASSET_BYTES" "$downloaded_asset" "$release_error" 120 \
+  gh api --hostname github.com --header 'Accept: application/octet-stream' \
+    --header "X-GitHub-Api-Version: $GH_API_VERSION" \
+    "repos/$REPOSITORY/releases/assets/$asset_id"; then
+  cat -- "$release_error" >&2
+  echo 'immutable release asset could not be downloaded for final verification' >&2
+  exit 1
+fi
+if ! test "$(wc -c <"$downloaded_asset")" -le "$MAX_ASSET_BYTES" \
+  || ! cmp "$RELEASE_RECORD" "$downloaded_asset" \
+  || ! test "$(wc -c <"$downloaded_asset")" = "$record_size" \
+  || ! test "sha256:$(sha256sum "$downloaded_asset" | awk '{print $1}')" = "$record_digest"; then
+  echo 'immutable release asset differs from the exact release record' >&2
+  exit 1
 fi

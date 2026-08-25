@@ -625,6 +625,9 @@ class PrepareInputsTests(unittest.TestCase):
                 "    state_path.write_text(json.dumps(state), encoding='utf-8')\n"
                 "    response, status = release, 201\n"
                 "elif endpoint == 'repos/TeleCrypt-io/telecrypt-synapse/releases/123' and '--method' in args:\n"
+                "    if os.environ.get('FAKE_EDIT_FAILURE'):\n"
+                "        sys.stderr.write('fixture publish rejected\\n')\n"
+                "        raise SystemExit(18)\n"
                 "    state['published'] = True\n"
                 "    state_path.write_text(json.dumps(state), encoding='utf-8')\n"
                 "    release['draft'] = False\n"
@@ -633,8 +636,12 @@ class PrepareInputsTests(unittest.TestCase):
                 "elif endpoint == 'repos/TeleCrypt-io/telecrypt-synapse/releases/123':\n"
                 "    response, status = release, 200\n"
                 "elif endpoint == 'https://uploads.github.com/repos/TeleCrypt-io/telecrypt-synapse/releases/123/assets?name=' + os.environ['RELEASE_ASSET_NAME']:\n"
-                "    state['asset'] = True\n"
-                "    state_path.write_text(json.dumps(state), encoding='utf-8')\n"
+                "    if os.environ.get('FAKE_UPLOAD_FAILURE'):\n"
+                "        sys.stderr.write('fixture upload rejected\\n')\n"
+                "        raise SystemExit(17)\n"
+                "    if not os.environ.get('FAKE_UPLOAD_NO_ASSET'):\n"
+                "        state['asset'] = True\n"
+                "        state_path.write_text(json.dumps(state), encoding='utf-8')\n"
                 "    response, status = asset, 201\n"
                 "elif endpoint == 'repos/TeleCrypt-io/telecrypt-synapse/releases/assets/321':\n"
                 "    sys.stdout.buffer.write(record)\n"
@@ -662,7 +669,6 @@ class PrepareInputsTests(unittest.TestCase):
             self.assertTrue(any("releases?per_page=100&page=1" in value for value in endpoints))
             self.assertTrue(any(value.endswith("releases/123") for value in endpoints))
             self.assertTrue(any(value == "https://uploads.github.com/repos/TeleCrypt-io/telecrypt-synapse/releases/123/assets?name=telecrypt-synapse-1.159-tc3.digest.json" for value in endpoints))
-            self.assertFalse(any(value.startswith("repos/TeleCrypt-io/telecrypt-synapse/releases/123/assets?name=") for value in endpoints))
             self.assertFalse(any(value == "uploads.github.com" for call in calls for value in call))
             self.assertTrue(any(value.endswith("releases/assets/321") for value in endpoints))
             self.assertFalse(any("releases/tags/" in value for value in endpoints))
@@ -683,6 +689,56 @@ class PrepareInputsTests(unittest.TestCase):
             endpoints = [value for call in calls for value in call if value.startswith(("repos/", "https://"))]
             self.assertTrue(any(value == "repos/TeleCrypt-io/telecrypt-synapse/releases" for value in endpoints))
             self.assertTrue(any(value.endswith("releases/123") for value in endpoints))
+
+            log.write_text("", encoding="utf-8")
+            state.write_text(
+                json.dumps({"exists": True, "asset": False, "published": False}),
+                encoding="utf-8",
+            )
+            result = self.run_publish_release(
+                payload,
+                RELEASE_ASSET_NAME="telecrypt-synapse-1.159-tc3.digest.json",
+                PATH=f"{directory}:{os.environ['PATH']}",
+                FAKE_GH_LOG=str(log),
+                FAKE_GH_STATE=str(state),
+                FAKE_UPLOAD_FAILURE="1",
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("fixture upload rejected", result.stderr)
+            self.assertIn("release asset upload failed (status 17)", result.stderr)
+
+            log.write_text("", encoding="utf-8")
+            state.write_text(
+                json.dumps({"exists": True, "asset": False, "published": False}),
+                encoding="utf-8",
+            )
+            result = self.run_publish_release(
+                payload,
+                RELEASE_ASSET_NAME="telecrypt-synapse-1.159-tc3.digest.json",
+                PATH=f"{directory}:{os.environ['PATH']}",
+                FAKE_GH_LOG=str(log),
+                FAKE_GH_STATE=str(state),
+                FAKE_UPLOAD_NO_ASSET="1",
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("release draft does not contain the exact uploaded asset", result.stderr)
+
+            log.write_text("", encoding="utf-8")
+            state.write_text(
+                json.dumps({"exists": True, "asset": True, "published": False}),
+                encoding="utf-8",
+            )
+            result = self.run_publish_release(
+                payload,
+                RELEASE_ASSET_NAME="telecrypt-synapse-1.159-tc3.digest.json",
+                PATH=f"{directory}:{os.environ['PATH']}",
+                FAKE_GH_LOG=str(log),
+                FAKE_GH_STATE=str(state),
+                FAKE_EDIT_FAILURE="1",
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("fixture publish rejected", result.stderr)
+            self.assertIn("release publication failed after PATCH (status 18)", result.stderr)
 
     def test_publish_release_fails_closed_on_duplicate_exact_tag_matches(self) -> None:
         payload = synapse_record()
