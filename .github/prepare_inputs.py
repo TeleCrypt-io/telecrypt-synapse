@@ -73,12 +73,6 @@ def s3_provider_fork_archive_name(release: str) -> str:
     return f"synapse-s3-storage-provider-{release}.tar.gz"
 
 
-def fork_source_archive_url(repository: str, release: str) -> str:
-    """Return the exact GitHub-generated source archive for a published fork tag."""
-
-    return f"https://github.com/{repository}/archive/refs/tags/{release}.tar.gz"
-
-
 def run_bounded_pip(command: list[str]) -> None:
     try:
         process = subprocess.Popen(
@@ -110,6 +104,7 @@ def run_bounded_pip(command: list[str]) -> None:
             chunk = os.read(key.fileobj.fileno(), 64 * 1024)
             if not chunk:
                 selector.unregister(key.fileobj)
+                key.fileobj.close()
                 continue
             stream = captured[key.data]
             if len(stream) + len(chunk) > MAX_PIP_OUTPUT_BYTES:
@@ -121,6 +116,11 @@ def run_bounded_pip(command: list[str]) -> None:
     return_code = process.wait()
     if overflow:
         fail(f"pip download emitted more than {MAX_PIP_OUTPUT_BYTES} bytes of diagnostics")
+    for name in ("stdout", "stderr"):
+        if captured[name]:
+            diagnostics = captured[name].decode("utf-8", errors="replace")
+            print(f"pip download {name}:", file=sys.stderr)
+            print(diagnostics, end="" if diagnostics.endswith("\n") else "\n", file=sys.stderr)
     if return_code != 0:
         fail(f"pip download failed with exit code {return_code}")
     if captured["stdout"] or captured["stderr"]:
@@ -163,12 +163,13 @@ def download(
     destination: Path,
     expected: str,
     *,
+    expected_host: str = "github.com",
     expected_size: int | None = None,
     max_bytes: int = MAX_FILE_BYTES,
 ) -> None:
     temporary: Path | None = None
     try:
-        validate_download_url(url, "github.com")
+        validate_download_url(url, expected_host)
         if expected_size is not None and (expected_size <= 0 or expected_size > max_bytes):
             raise ValueError(f"advertised size is outside the {max_bytes} byte file limit")
         with tempfile.NamedTemporaryFile(
@@ -418,7 +419,7 @@ def validate_fork_release(metadata: dict, repository: str, release: str) -> None
         fail(f"{repository} fork release is not the exact immutable source-only contract")
 
 
-def fetch_fork_release(repository: str, release: str, expected_commit: str) -> None:
+def fetch_fork_release(repository: str, release: str, expected_commit: str) -> str:
     metadata = fetch_github_api(
         repository,
         f"releases/tags/{release}",
@@ -427,6 +428,7 @@ def fetch_fork_release(repository: str, release: str, expected_commit: str) -> N
     )
     validate_fork_release(metadata, repository, release)
     fetch_fork_annotated_tag(repository, release, expected_commit)
+    return metadata["tarball_url"]
 
 
 def validate_controlplane_assets(
@@ -722,7 +724,6 @@ def main() -> None:
             "download",
             "--disable-pip-version-check",
             "--quiet",
-            "--root-user-action=ignore",
             "--no-cache-dir",
             "--only-binary=:all:",
             "--no-deps",
@@ -739,32 +740,32 @@ def main() -> None:
     )
     validate_wheelhouse(wheelhouse, expected)
 
-    fetch_fork_release(
+    synapse_archive_url = fetch_fork_release(
         SYNAPSE_FORK_REPOSITORY,
         args.synapse_fork_release,
         args.synapse_fork_commit,
     )
-    fetch_fork_release(
+    provider_archive_url = fetch_fork_release(
         S3_PROVIDER_FORK_REPOSITORY,
         args.s3_provider_fork_release,
         args.s3_provider_fork_commit,
     )
     synapse_archive = synapse_fork_archive_name(args.synapse_fork_release)
-    synapse_archive_url = fork_source_archive_url(
-        SYNAPSE_FORK_REPOSITORY, args.synapse_fork_release
-    )
     download(
         synapse_archive_url,
         args.output / synapse_archive,
         args.synapse_fork_archive_sha256,
+        expected_host="api.github.com",
     )
     validate_synapse_fork_archive(args.output / synapse_archive, args.synapse_fork_commit, args.synapse_fork_release)
 
     archive = s3_provider_fork_archive_name(args.s3_provider_fork_release)
-    archive_url = fork_source_archive_url(
-        S3_PROVIDER_FORK_REPOSITORY, args.s3_provider_fork_release
+    download(
+        provider_archive_url,
+        args.output / archive,
+        args.s3_provider_fork_archive_sha256,
+        expected_host="api.github.com",
     )
-    download(archive_url, args.output / archive, args.s3_provider_fork_archive_sha256)
     validate_provider_build_contract(args.output / archive)
 
     wheel = f"telecrypt_tier_controller-{args.controlplane_release}-py3-none-any.whl"

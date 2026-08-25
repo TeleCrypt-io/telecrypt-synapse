@@ -87,22 +87,10 @@ class ProvenanceTests(unittest.TestCase):
         values = validate_provenance.load_lock(ROOT / "provenance.lock")
         synapse_name = f"synapse-{values['SYNAPSE_FORK_RELEASE']}.tar.gz"
         provider_name = f"synapse-s3-storage-provider-{values['S3_PROVIDER_FORK_RELEASE']}.tar.gz"
-        self.assertEqual(
-            prepare_inputs.fork_source_archive_url(
-                prepare_inputs.SYNAPSE_FORK_REPOSITORY,
-                values["SYNAPSE_FORK_RELEASE"],
-            ),
-            "https://github.com/TeleCrypt-io/synapse/archive/refs/tags/"
-            f"{values['SYNAPSE_FORK_RELEASE']}.tar.gz",
-        )
-        self.assertEqual(
-            prepare_inputs.fork_source_archive_url(
-                prepare_inputs.S3_PROVIDER_FORK_REPOSITORY,
-                values["S3_PROVIDER_FORK_RELEASE"],
-            ),
-            "https://github.com/TeleCrypt-io/synapse-s3-storage-provider/archive/refs/tags/"
-            f"{values['S3_PROVIDER_FORK_RELEASE']}.tar.gz",
-        )
+        source = (ROOT / ".github" / "prepare_inputs.py").read_text(encoding="utf-8")
+        self.assertIn('return metadata["tarball_url"]', source)
+        self.assertNotIn("/archive/refs/tags/", source)
+        self.assertNotIn("--root-user-action", source)
         self.assertEqual(prepare_inputs.synapse_fork_archive_name(values["SYNAPSE_FORK_RELEASE"]), synapse_name)
         self.assertEqual(prepare_inputs.s3_provider_fork_archive_name(values["S3_PROVIDER_FORK_RELEASE"]), provider_name)
         workflow = (ROOT / ".github" / "workflows" / "image.yml").read_text(encoding="utf-8")

@@ -3,16 +3,18 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr
 import io
 import json
 import os
+from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
 import urllib.request
 from unittest import mock
-from pathlib import Path
 
 import prepare_inputs
 import validate_release
@@ -121,6 +123,31 @@ def fork_release_metadata(
 
 
 class PrepareInputsTests(unittest.TestCase):
+    def test_bounded_pip_accepts_silent_success(self) -> None:
+        prepare_inputs.run_bounded_pip([sys.executable, "-c", "pass"])
+
+    def test_bounded_pip_surfaces_failure_diagnostics(self) -> None:
+        diagnostics = io.StringIO()
+        with redirect_stderr(diagnostics), self.assertRaises(SystemExit) as failure:
+            prepare_inputs.run_bounded_pip(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; print('fixture failure', file=sys.stderr); raise SystemExit(2)",
+                ]
+            )
+        self.assertIn("fixture failure", diagnostics.getvalue())
+        self.assertIn("exit code 2", str(failure.exception))
+
+    def test_bounded_pip_rejects_and_surfaces_success_diagnostics(self) -> None:
+        diagnostics = io.StringIO()
+        with redirect_stderr(diagnostics), self.assertRaises(SystemExit) as failure:
+            prepare_inputs.run_bounded_pip(
+                [sys.executable, "-c", "print('unexpected output')"]
+            )
+        self.assertIn("unexpected output", diagnostics.getvalue())
+        self.assertIn("unexpected diagnostics", str(failure.exception))
+
     def run_publish_release(
         self, record_bytes: bytes, **changes: str
     ) -> subprocess.CompletedProcess[str]:
@@ -248,7 +275,12 @@ class PrepareInputsTests(unittest.TestCase):
             "fetch_github_api",
             side_effect=lambda repository, endpoint, max_bytes, label: responses[endpoint],
         ):
-            prepare_inputs.fetch_fork_release(FORK_REPOSITORY, FORK_RELEASE, FORK_SOURCE_COMMIT)
+            self.assertEqual(
+                prepare_inputs.fetch_fork_release(
+                    FORK_REPOSITORY, FORK_RELEASE, FORK_SOURCE_COMMIT
+                ),
+                f"https://api.github.com/repos/{FORK_REPOSITORY}/tarball/{FORK_RELEASE}",
+            )
         with mock.patch.object(
             prepare_inputs,
             "fetch_github_api",
