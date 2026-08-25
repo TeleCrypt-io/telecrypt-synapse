@@ -625,6 +625,11 @@ class PrepareInputsTests(unittest.TestCase):
                 "    state_path.write_text(json.dumps(state), encoding='utf-8')\n"
                 "    response, status = release, 201\n"
                 "elif endpoint == 'repos/TeleCrypt-io/telecrypt-synapse/releases/123' and '--method' in args:\n"
+                "    if os.environ.get('FAKE_EDIT_COMMITTED_FAILURE'):\n"
+                "        state['published'] = True\n"
+                "        state_path.write_text(json.dumps(state), encoding='utf-8')\n"
+                "        sys.stderr.write('fixture publish response lost\\n')\n"
+                "        raise SystemExit(19)\n"
                 "    if os.environ.get('FAKE_EDIT_FAILURE'):\n"
                 "        sys.stderr.write('fixture publish rejected\\n')\n"
                 "        raise SystemExit(18)\n"
@@ -740,6 +745,23 @@ class PrepareInputsTests(unittest.TestCase):
             self.assertIn("fixture publish rejected", result.stderr)
             self.assertIn("release publication failed after PATCH (status 18)", result.stderr)
 
+            log.write_text("", encoding="utf-8")
+            state.write_text(
+                json.dumps({"exists": True, "asset": True, "published": False}),
+                encoding="utf-8",
+            )
+            result = self.run_publish_release(
+                payload,
+                RELEASE_ASSET_NAME="telecrypt-synapse-1.159-tc3.digest.json",
+                PATH=f"{directory}:{os.environ['PATH']}",
+                FAKE_GH_LOG=str(log),
+                FAKE_GH_STATE=str(state),
+                FAKE_EDIT_COMMITTED_FAILURE="1",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("fixture publish response lost", result.stderr)
+            self.assertIn("exact immutable readback resolved the outcome", result.stderr)
+
     def test_publish_release_fails_closed_on_duplicate_exact_tag_matches(self) -> None:
         payload = synapse_record()
         with tempfile.TemporaryDirectory() as directory:
@@ -765,7 +787,7 @@ class PrepareInputsTests(unittest.TestCase):
             self.assertNotIn("releases/124", log.read_text(encoding="utf-8"))
 
     def test_publish_release_uses_machine_http_status_and_rejects_oversize_api_output(self) -> None:
-        payload = record(tag="1.159-tc3")
+        payload = synapse_record()
         with tempfile.TemporaryDirectory() as directory:
             directory_path = Path(directory)
             fake_gh = directory_path / "gh"
@@ -787,12 +809,15 @@ class PrepareInputsTests(unittest.TestCase):
                 "PATH": f"{directory}:{os.environ['PATH']}",
                 "FAKE_GH_LOG": str(log),
                 "FAKE_GH_MODE": str(mode),
+                "RELEASE_ASSET_NAME": "telecrypt-synapse-1.159-tc3.digest.json",
             }
             result = self.run_publish_release(payload, **environment)
             self.assertNotEqual(result.returncode, 0)
+            self.assertIn("release discovery failed", result.stderr)
             mode.write_text("oversize\n", encoding="utf-8")
             result = self.run_publish_release(payload, **environment)
             self.assertNotEqual(result.returncode, 0)
+            self.assertIn("release discovery failed", result.stderr)
 
     def test_publish_workflow_checks_tag_object_and_bounded_gh_calls(self) -> None:
         workflow = (Path(__file__).resolve().parent / "workflows" / "image.yml").read_text(encoding="utf-8")

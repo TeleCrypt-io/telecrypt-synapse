@@ -88,13 +88,14 @@ discover_release_id() {
   local page page_size complete=0 command_status code match_count
   : >"$release_matches"
   for page in $(seq 1 10); do
-    set +e
-    bounded_command "$MAX_API_BYTES" "$release_page_headers" "$release_error" 30 \
+    if bounded_command "$MAX_API_BYTES" "$release_page_headers" "$release_error" 30 \
       gh api --include --hostname github.com --header 'Accept: application/vnd.github+json' \
       --header "X-GitHub-Api-Version: $GH_API_VERSION" \
-      "repos/$REPOSITORY/releases?per_page=100&page=$page"
-    command_status=$?
-    set -e
+      "repos/$REPOSITORY/releases?per_page=100&page=$page"; then
+      command_status=0
+    else
+      command_status=$?
+    fi
     test "$command_status" -eq 0 || return 1
     test "$(wc -c <"$release_page_headers")" -le "$MAX_API_BYTES" || return 1
     test "$(wc -c <"$release_error")" -le "$MAX_API_BYTES" || return 1
@@ -131,13 +132,14 @@ discover_release_id() {
 
 get_release_by_id() {
   local command_status code
-  set +e
-  bounded_command "$MAX_API_BYTES" "$release_headers" "$release_error" 30 \
+  if bounded_command "$MAX_API_BYTES" "$release_headers" "$release_error" 30 \
     gh api --include --hostname github.com --header 'Accept: application/vnd.github+json' \
     --header "X-GitHub-Api-Version: $GH_API_VERSION" \
-    "repos/$REPOSITORY/releases/$release_id"
-  command_status=$?
-  set -e
+    "repos/$REPOSITORY/releases/$release_id"; then
+    command_status=0
+  else
+    command_status=$?
+  fi
   test "$(wc -c <"$release_headers")" -le "$MAX_API_BYTES" || return 1
   test "$(wc -c <"$release_error")" -le "$MAX_API_BYTES" || return 1
   code="$(http_status "$release_headers")" || return 1
@@ -184,18 +186,23 @@ if get_release; then
   fi
 else
   status=$?
-  test "$status" = 4
-  set +e
-  bounded_command "$MAX_COMMAND_BYTES" "$release_json.create.log" "$release_json.create.error" 60 \
-  gh api --include --hostname github.com --method POST \
-    --header 'Accept: application/vnd.github+json' \
-    --header "X-GitHub-Api-Version: $GH_API_VERSION" \
-    --field "tag_name=$EXPECTED_TAG" --field "target_commitish=$EXPECTED_SHA" \
-    --field "name=$EXPECTED_TAG" --field "body=$RELEASE_BODY" \
-    --field draft=true --field prerelease=false \
-    "repos/$REPOSITORY/releases"
-  create_status=$?
-  set -e
+  if [[ "$status" -ne 4 ]]; then
+    cat -- "$release_error" >&2
+    printf 'release discovery failed (status %s)\n' "$status" >&2
+    exit 1
+  fi
+  if bounded_command "$MAX_COMMAND_BYTES" "$release_json.create.log" "$release_json.create.error" 60 \
+    gh api --include --hostname github.com --method POST \
+      --header 'Accept: application/vnd.github+json' \
+      --header "X-GitHub-Api-Version: $GH_API_VERSION" \
+      --field "tag_name=$EXPECTED_TAG" --field "target_commitish=$EXPECTED_SHA" \
+      --field "name=$EXPECTED_TAG" --field "body=$RELEASE_BODY" \
+      --field draft=true --field prerelease=false \
+      "repos/$REPOSITORY/releases"; then
+    create_status=0
+  else
+    create_status=$?
+  fi
   if ! get_release; then
     cat -- "$release_json.create.log" "$release_json.create.error" >&2
     echo 'release draft could not be read back after creation' >&2
@@ -215,15 +222,16 @@ fi
 asset_count="$(jq -er '.assets|length' "$release_json")"
 if [[ "$asset_count" -eq 0 ]]; then
   test "$record_size" -le "$MAX_ASSET_BYTES"
-  set +e
-  bounded_command "$MAX_COMMAND_BYTES" "$release_json.upload.log" "$release_json.upload.error" 120 \
+  if bounded_command "$MAX_COMMAND_BYTES" "$release_json.upload.log" "$release_json.upload.error" 120 \
     gh api --include --hostname github.com --method POST \
       --header 'Accept: application/vnd.github+json' \
       --header "X-GitHub-Api-Version: $GH_API_VERSION" \
       --header 'Content-Type: application/octet-stream' --input "$RELEASE_RECORD" \
-      "https://uploads.github.com/repos/$REPOSITORY/releases/$release_id/assets?name=$RELEASE_ASSET_NAME"
-  upload_status=$?
-  set -e
+      "https://uploads.github.com/repos/$REPOSITORY/releases/$release_id/assets?name=$RELEASE_ASSET_NAME"; then
+    upload_status=0
+  else
+    upload_status=$?
+  fi
   if [[ "$upload_status" -ne 0 || -s "$release_json.upload.error" ]]; then
     cat -- "$release_json.upload.log" "$release_json.upload.error" >&2
     printf 'release asset upload failed (status %s)\n' "$upload_status" >&2
@@ -263,15 +271,16 @@ if ! test "$(wc -c <"$downloaded_asset")" -le "$MAX_ASSET_BYTES" \
   echo 'downloaded draft asset differs from the exact release record' >&2
   exit 1
 fi
-set +e
-bounded_command "$MAX_COMMAND_BYTES" "$release_json.edit.log" "$release_json.edit.error" 60 \
-gh api --include --hostname github.com --method PATCH \
-  --header 'Accept: application/vnd.github+json' \
-  --header "X-GitHub-Api-Version: $GH_API_VERSION" \
-  --field draft=false --field prerelease=false --field "name=$EXPECTED_TAG" \
-  --field "body=$RELEASE_BODY" "repos/$REPOSITORY/releases/$release_id"
-edit_status=$?
-set -e
+if bounded_command "$MAX_COMMAND_BYTES" "$release_json.edit.log" "$release_json.edit.error" 60 \
+  gh api --include --hostname github.com --method PATCH \
+    --header 'Accept: application/vnd.github+json' \
+    --header "X-GitHub-Api-Version: $GH_API_VERSION" \
+    --field draft=false --field prerelease=false --field "name=$EXPECTED_TAG" \
+    --field "body=$RELEASE_BODY" "repos/$REPOSITORY/releases/$release_id"; then
+  edit_status=0
+else
+  edit_status=$?
+fi
 if ! get_release; then
   cat -- "$release_json.edit.log" "$release_json.edit.error" "$release_error" >&2
   printf 'published release could not be read back after PATCH (status %s)\n' "$edit_status" >&2
@@ -286,6 +295,10 @@ if ! env EXPECTED_TAG="$EXPECTED_TAG" RELEASE_ASSET_NAME="$RELEASE_ASSET_NAME" \
   cat -- "$release_json.edit.log" "$release_json.edit.error" >&2
   printf 'release publication failed after PATCH (status %s)\n' "$edit_status" >&2
   exit 1
+fi
+if [[ "$edit_status" -ne 0 || -s "$release_json.edit.error" ]]; then
+  cat -- "$release_json.edit.log" "$release_json.edit.error" >&2
+  printf 'release PATCH transport returned status %s; exact immutable readback resolved the outcome\n' "$edit_status" >&2
 fi
 asset_id="$(jq -er '.assets[0].id | select(type == "number" and . > 0 and . == floor)' "$release_json")"
 [[ "$asset_id" =~ ^[1-9][0-9]*$ ]]
