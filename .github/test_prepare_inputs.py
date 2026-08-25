@@ -857,6 +857,27 @@ class PrepareInputsTests(unittest.TestCase):
                 invalid_metadata, "ghcr.io/element-hq/synapse:v1.159.0", digest
             )
 
+    def test_build_provenance_accepts_exact_tagged_amd64_material(self) -> None:
+        digest = "sha256:" + "3" * 64
+        metadata = {
+            "buildx.build.provenance": {
+                "materials": [
+                    {
+                        "uri": "pkg:docker/ghcr.io/element-hq/synapse@v1.159.0?platform=linux%2Famd64",
+                        "digest": {"sha256": "3" * 64},
+                    }
+                ]
+            }
+        }
+        verify_base_provenance.validate_metadata(
+            metadata, "ghcr.io/element-hq/synapse:v1.159.0", digest
+        )
+        metadata["buildx.build.provenance"]["materials"][0]["digest"]["sha256"] = "4" * 64
+        with self.assertRaises(SystemExit):
+            verify_base_provenance.validate_metadata(
+                metadata, "ghcr.io/element-hq/synapse:v1.159.0", digest
+            )
+
     def test_build_provenance_accepts_v1_tagged_amd64_dependency(self) -> None:
         digest = "sha256:" + "2" * 64
         metadata = {

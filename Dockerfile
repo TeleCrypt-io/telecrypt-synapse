@@ -1,12 +1,14 @@
 # syntax=docker/dockerfile:1
 # Build only in GitHub Actions. The server pulls an exact published tag; it never builds this image.
 ARG SYNAPSE_VERSION
-FROM ghcr.io/element-hq/synapse:v${SYNAPSE_VERSION} AS runtime
+ARG SYNAPSE_BASE_DIGEST
+FROM ghcr.io/element-hq/synapse:v${SYNAPSE_VERSION}@${SYNAPSE_BASE_DIGEST} AS runtime
 
 # The media behavior is carried by exact TeleCrypt fork source archives. The
 # upstream base tags and fork commits are locked outside this Dockerfile and
 # supplied only by the verified GitHub Actions inputs.
 ARG SYNAPSE_VERSION
+ARG SYNAPSE_BASE_DIGEST
 ARG SYNAPSE_FORK_RELEASE
 ARG SYNAPSE_FORK_COMMIT
 ARG SYNAPSE_FORK_ARCHIVE_SHA256
@@ -22,6 +24,7 @@ RUN --mount=type=bind,source=s3-provider.lock,target=/tmp/s3-provider.lock,reado
     --mount=type=bind,source=release-inputs,target=/tmp/release-inputs,readonly \
     set -eux; \
     test -n "${SYNAPSE_VERSION}" || { echo "SYNAPSE_VERSION is required" >&2; exit 2; }; \
+    printf '%s\n' "${SYNAPSE_BASE_DIGEST}" | grep -Eq '^sha256:[0-9a-f]{64}$' || { echo "SYNAPSE_BASE_DIGEST is not an exact digest" >&2; exit 2; }; \
     test -n "${SYNAPSE_FORK_RELEASE}" || { echo "SYNAPSE_FORK_RELEASE is required" >&2; exit 2; }; \
     printf '%s\n' "${SYNAPSE_FORK_RELEASE}" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-telecrypt\.[1-9][0-9]*$' || { echo "SYNAPSE_FORK_RELEASE is not an exact fork release" >&2; exit 2; }; \
     test -n "${SYNAPSE_FORK_COMMIT}" || { echo "SYNAPSE_FORK_COMMIT is required" >&2; exit 2; }; \

@@ -117,6 +117,7 @@ class ProvenanceTests(unittest.TestCase):
         ):
             self.assertIn(argument, workflow)
         for name in (
+            "SYNAPSE_BASE_DIGEST",
             "SYNAPSE_FORK_RELEASE",
             "SYNAPSE_FORK_COMMIT",
             "SYNAPSE_FORK_ARCHIVE_SHA256",
@@ -126,6 +127,11 @@ class ProvenanceTests(unittest.TestCase):
         ):
             self.assertIn(name, dockerfile)
         self.assertIn('synapse-${SYNAPSE_FORK_RELEASE}.tar.gz', dockerfile)
+        self.assertIn(
+            "ghcr.io/element-hq/synapse:v${SYNAPSE_VERSION}@${SYNAPSE_BASE_DIGEST}",
+            dockerfile,
+        )
+        self.assertIn("SYNAPSE_BASE_DIGEST=${{ steps.base.outputs.digest }}", workflow)
         self.assertIn('synapse-s3-storage-provider-${S3_PROVIDER_FORK_RELEASE}.tar.gz', dockerfile)
         self.assertIn("--strip-components=1", dockerfile)
         self.assertNotIn("synapse-${SYNAPSE_FORK_RELEASE}/synapse", dockerfile)

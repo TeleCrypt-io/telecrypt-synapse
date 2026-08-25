@@ -64,12 +64,13 @@ def digest_matches(material: object, expected_digest: str) -> bool:
 
 
 def validate_v02_materials(
-    materials: object, image: str, expected_digest: str
+    materials: object, image: str, tag: str, expected_digest: str
 ) -> None:
     if not isinstance(materials, list):
         fail("BuildKit v0.2 provenance has no materials list")
     expected_uris = {
         f"pkg:docker/{image}@{expected_digest}",
+        f"pkg:docker/{image}@{tag}?platform=linux%2Famd64",
         f"docker-image://{image}@{expected_digest}",
     }
     base_materials = [
@@ -127,7 +128,7 @@ def validate_metadata(
             build_definition.get("resolvedDependencies"), image, tag, expected_digest
         )
         return
-    validate_v02_materials(provenance.get("materials"), image, expected_digest)
+    validate_v02_materials(provenance.get("materials"), image, tag, expected_digest)
 
 
 def main() -> None:

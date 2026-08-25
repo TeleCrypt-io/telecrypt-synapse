@@ -270,6 +270,7 @@ jobs:
           outputs: type=docker,dest=${{ runner.temp }}/telecrypt-synapse-${{ needs.versions.outputs.image_tag }}.tar
           build-args: |
             SYNAPSE_VERSION=${{ needs.versions.outputs.synapse_version }}
+            SYNAPSE_BASE_DIGEST=${{ steps.base.outputs.digest }}
             SYNAPSE_FORK_RELEASE=${{ needs.versions.outputs.synapse_fork_release }}
             SYNAPSE_FORK_COMMIT=${{ needs.versions.outputs.synapse_fork_commit }}
             SYNAPSE_FORK_ARCHIVE_SHA256=${{ needs.versions.outputs.synapse_fork_archive_sha256 }}
