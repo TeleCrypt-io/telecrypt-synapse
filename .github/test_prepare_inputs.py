@@ -259,7 +259,6 @@ class PrepareInputsTests(unittest.TestCase):
                 },
             },
             f"git/tags/{FORK_ANNOTATED_TAG_SHA}": {
-                "type": "tag",
                 "sha": FORK_ANNOTATED_TAG_SHA,
                 "tag": FORK_RELEASE,
                 "url": f"https://api.github.com/repos/{FORK_REPOSITORY}/git/tags/{FORK_ANNOTATED_TAG_SHA}",
@@ -747,7 +746,6 @@ class PrepareInputsTests(unittest.TestCase):
                 },
             },
             f"git/tags/{ANNOTATED_TAG_SHA}": {
-                "type": "tag",
                 "sha": ANNOTATED_TAG_SHA,
                 "tag": RELEASE,
                 "url": f"https://api.github.com/repos/TeleCrypt-io/controlplane/git/tags/{ANNOTATED_TAG_SHA}",

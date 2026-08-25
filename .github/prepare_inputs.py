@@ -272,8 +272,7 @@ def fetch_fork_annotated_tag(repository: str, release: str, expected_commit: str
         fail("fork annotated tag ref has no exact tag-object SHA")
     tag_object = fetch_fork_api(repository, f"git/tags/{annotated_tag_sha}")
     if (
-        tag_object.get("type") != "tag"
-        or tag_object.get("sha") != annotated_tag_sha
+        tag_object.get("sha") != annotated_tag_sha
         or tag_object.get("tag") != release
         or tag_object.get("url") != f"{api_root}/git/tags/{annotated_tag_sha}"
     ):
@@ -372,8 +371,7 @@ def fetch_controlplane_annotated_tag(release: str) -> tuple[str, str]:
 
     tag_object = fetch_controlplane_api(f"git/tags/{annotated_tag_sha}", MAX_API_JSON_BYTES)
     if (
-        tag_object.get("type") != "tag"
-        or tag_object.get("sha") != annotated_tag_sha
+        tag_object.get("sha") != annotated_tag_sha
         or tag_object.get("tag") != release
         or tag_object.get("url") != f"{api_root}/git/tags/{annotated_tag_sha}"
     ):

@@ -76,11 +76,6 @@ git_safe() {
     "$GIT" "${GIT_OPTIONS[@]}" "$@"
   status=$?
   set -e
-  if (( status != 0 )); then
-    printf 'Git output exceeded %s bytes on a single stream\n' "$MAX_GIT_OUTPUT_BYTES" >&2
-    rm -f -- "$stdout_file" "$stderr_file"
-    return 1
-  fi
   cat -- "$stdout_file"
   cat -- "$stderr_file" >&2
   rm -f -- "$stdout_file" "$stderr_file"

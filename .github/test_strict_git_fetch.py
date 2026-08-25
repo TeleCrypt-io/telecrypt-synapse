@@ -137,6 +137,16 @@ class StrictGitFetchTests(unittest.TestCase):
     def test_check_is_a_real_git_operation(self) -> None:
         result = self.run_helper("check", GIT_CONFIG_SYSTEM="/tmp/hostile", GIT_CONFIG_GLOBAL="/tmp/hostile")
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+
+    def test_git_failure_surfaces_its_real_bounded_diagnostics(self) -> None:
+        (self.root / ".git" / "HEAD").write_text(
+            "ref: refs/heads/missing\n", encoding="ascii"
+        )
+        result = self.run_helper("local-read", "rev-parse", "HEAD")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fatal:", result.stderr)
+        self.assertNotIn("output exceeded", result.stderr)
 
     def test_accepts_github_canonical_remote_with_or_without_git_suffix(self) -> None:
         for remote in (
