@@ -173,6 +173,7 @@ check_draft() {
     (.assets|type == "array" and length <= 1) and
     ((.assets|length) == 0 or
       ((.assets|length) == 1 and .assets[0].name == $asset and
+       .assets[0].label == "" and
        .assets[0].state == "uploaded" and
        (.assets[0].id | type == "number" and . > 0 and . == floor) and
        (.assets[0].size | type == "number" and . > 0 and . == floor and . <= $max_asset_bytes)))

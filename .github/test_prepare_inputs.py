@@ -543,7 +543,7 @@ class PrepareInputsTests(unittest.TestCase):
             "assets": [{
                 "id": 10,
                 "name": "telecrypt-synapse-1.159-tc3.digest.json",
-                "label": None,
+                "label": "",
                 "state": "uploaded",
                 "size": len(payload),
                 "digest": digest,
@@ -610,7 +610,7 @@ class PrepareInputsTests(unittest.TestCase):
                 "state_path = Path(os.environ['FAKE_GH_STATE'])\n"
                 "state = json.loads(state_path.read_text(encoding='utf-8'))\n"
                 "record = Path(os.environ['RELEASE_RECORD']).read_bytes()\n"
-                "asset = {'id': 321, 'name': os.environ['RELEASE_ASSET_NAME'], 'label': None,\n"
+                "asset = {'id': 321, 'name': os.environ['RELEASE_ASSET_NAME'], 'label': '',\n"
                 "         'state': 'uploaded', 'size': len(record),\n"
                 "         'digest': 'sha256:' + hashlib.sha256(record).hexdigest()}\n"
                 "release = {'id': 123, 'tag_name': os.environ['EXPECTED_TAG'],\n"
@@ -875,7 +875,7 @@ class PrepareInputsTests(unittest.TestCase):
             "assets": [{
                 "name": "telecrypt-synapse-1.159-tc3.digest.json",
                 "id": 8,
-                "label": None,
+                "label": "",
                 "state": "uploaded",
                 "size": 10,
                 "url": "https://api.github.com/repos/TeleCrypt-io/telecrypt-synapse/releases/assets/8",
@@ -893,17 +893,22 @@ class PrepareInputsTests(unittest.TestCase):
             record_digest=digest,
             record_size=10,
         )
-        invalid = dict(document)
-        invalid["assets"] = [dict(document["assets"][0], digest="sha256:" + "e" * 64)]
-        with self.assertRaises(SystemExit):
-            validate_release.validate_release(
-                invalid,
-                tag="1.159-tc3",
-                asset_name="telecrypt-synapse-1.159-tc3.digest.json",
-                body=f"Exact Synapse release for source commit {SOURCE_COMMIT}.",
-                record_digest=digest,
-                record_size=10,
-            )
+        for changes in (
+            {"digest": "sha256:" + "e" * 64},
+            {"label": None},
+            {"label": "unexpected"},
+        ):
+            invalid = dict(document)
+            invalid["assets"] = [dict(document["assets"][0], **changes)]
+            with self.assertRaises(SystemExit):
+                validate_release.validate_release(
+                    invalid,
+                    tag="1.159-tc3",
+                    asset_name="telecrypt-synapse-1.159-tc3.digest.json",
+                    body=f"Exact Synapse release for source commit {SOURCE_COMMIT}.",
+                    record_digest=digest,
+                    record_size=10,
+                )
 
     def test_annotated_tag_is_peeled_to_commit(self) -> None:
         responses = {

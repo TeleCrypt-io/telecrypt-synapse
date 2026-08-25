@@ -50,7 +50,7 @@ def validate_release(
         fail("asset id is not a positive integer")
     if (
         asset.get("name") != asset_name
-        or asset.get("label") is not None
+        or asset.get("label") != ""
         or "label" not in asset
         or asset.get("state") != "uploaded"
         or type(asset.get("size")) is not int
