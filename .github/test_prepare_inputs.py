@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr
+import hashlib
 import io
 import json
 import os
@@ -123,6 +124,51 @@ def fork_release_metadata(
 
 
 class PrepareInputsTests(unittest.TestCase):
+    def test_download_uses_explicit_host_specific_media_types(self) -> None:
+        payload = b"exact archive bytes"
+        expected = hashlib.sha256(payload).hexdigest()
+
+        class Response:
+            def __init__(self) -> None:
+                self.remaining = [payload, b""]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *unused: object) -> None:
+                return None
+
+            def read(self, unused_size: int) -> bytes:
+                return self.remaining.pop(0)
+
+        requests: list[urllib.request.Request] = []
+
+        def open_request(request: urllib.request.Request, *, timeout: int) -> Response:
+            self.assertEqual(timeout, prepare_inputs.DOWNLOAD_TIMEOUT_SECONDS)
+            requests.append(request)
+            return Response()
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            prepare_inputs.URL_OPENER, "open", side_effect=open_request
+        ):
+            root = Path(directory)
+            prepare_inputs.download(
+                "https://api.github.com/repos/TeleCrypt-io/synapse/tarball/v1.0.0-telecrypt.1",
+                root / "archive.tar.gz",
+                expected,
+                expected_host="api.github.com",
+                accept=prepare_inputs.GITHUB_API_ACCEPT,
+            )
+            prepare_inputs.download(
+                "https://github.com/TeleCrypt-io/controlplane/releases/download/1.0.0/input.whl",
+                root / "input.whl",
+                expected,
+            )
+        self.assertEqual(
+            [request.get_header("Accept") for request in requests],
+            [prepare_inputs.GITHUB_API_ACCEPT, prepare_inputs.BINARY_ACCEPT],
+        )
+
     def test_bounded_pip_accepts_silent_success(self) -> None:
         prepare_inputs.run_bounded_pip([sys.executable, "-c", "pass"])
 

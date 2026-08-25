@@ -39,6 +39,8 @@ PIP_SUBPROCESS_TIMEOUT_SECONDS = 300
 MAX_PIP_OUTPUT_BYTES = 64 * 1024
 GITHUB_API_VERSION = "2026-03-10"
 GITHUB_API_ROOT = "https://api.github.com"
+GITHUB_API_ACCEPT = "application/vnd.github+json"
+BINARY_ACCEPT = "application/octet-stream"
 CONTROLPLANE_REPOSITORY = "TeleCrypt-io/controlplane"
 SYNAPSE_FORK_REPOSITORY = "TeleCrypt-io/synapse"
 S3_PROVIDER_FORK_REPOSITORY = "TeleCrypt-io/synapse-s3-storage-provider"
@@ -164,12 +166,15 @@ def download(
     expected: str,
     *,
     expected_host: str = "github.com",
+    accept: str = BINARY_ACCEPT,
     expected_size: int | None = None,
     max_bytes: int = MAX_FILE_BYTES,
 ) -> None:
     temporary: Path | None = None
     try:
         validate_download_url(url, expected_host)
+        if accept not in {BINARY_ACCEPT, GITHUB_API_ACCEPT}:
+            raise ValueError("download media type is not approved")
         if expected_size is not None and (expected_size <= 0 or expected_size > max_bytes):
             raise ValueError(f"advertised size is outside the {max_bytes} byte file limit")
         with tempfile.NamedTemporaryFile(
@@ -181,7 +186,7 @@ def download(
             request = urllib.request.Request(
                 url,
                 headers={
-                    "Accept": "application/octet-stream",
+                    "Accept": accept,
                     "User-Agent": "telecrypt-synapse-build",
                 },
             )
@@ -222,7 +227,7 @@ def fetch_github_api(repository: str, endpoint: str, max_bytes: int, label: str)
     request = urllib.request.Request(
         url,
         headers={
-            "Accept": "application/vnd.github+json",
+            "Accept": GITHUB_API_ACCEPT,
             "X-GitHub-Api-Version": GITHUB_API_VERSION,
             "User-Agent": "telecrypt-synapse-build",
         },
@@ -754,6 +759,7 @@ def main() -> None:
         args.output / synapse_archive,
         args.synapse_fork_archive_sha256,
         expected_host="api.github.com",
+        accept=GITHUB_API_ACCEPT,
     )
     validate_synapse_fork_archive(args.output / synapse_archive, args.synapse_fork_commit, args.synapse_fork_release)
 
@@ -763,6 +769,7 @@ def main() -> None:
         args.output / archive,
         args.s3_provider_fork_archive_sha256,
         expected_host="api.github.com",
+        accept=GITHUB_API_ACCEPT,
     )
     validate_provider_build_contract(args.output / archive)
 
