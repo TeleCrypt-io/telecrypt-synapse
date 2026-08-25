@@ -22,10 +22,10 @@ class ProvenanceTests(unittest.TestCase):
         path: Path,
         commit: str,
         *,
-        release: str | None = None,
         unsafe_link: bool = False,
+        second_root: bool = False,
     ) -> None:
-        root = f"synapse-{release or commit}"
+        root = f"TeleCrypt-io-synapse-{commit[:7]}"
         with tarfile.open(path, mode="w:gz") as archive:
             for name in (f"{root}/", f"{root}/synapse/"):
                 member = tarfile.TarInfo(name)
@@ -39,6 +39,10 @@ class ProvenanceTests(unittest.TestCase):
             link.type = tarfile.SYMTYPE
             link.linkname = "synapse/__init__.py" if not unsafe_link else "../../outside"
             archive.addfile(link)
+            if second_root:
+                member = tarfile.TarInfo("unexpected/")
+                member.type = tarfile.DIRTYPE
+                archive.addfile(member)
 
     def test_checked_in_provenance_matches_versions(self) -> None:
         values = validate_provenance.load_lock(ROOT / "provenance.lock")
@@ -74,14 +78,22 @@ class ProvenanceTests(unittest.TestCase):
 
     def test_synapse_archive_validator_accepts_safe_links_and_rejects_escape(self) -> None:
         commit = "a" * 40
-        release = "v1.159.0-telecrypt.1"
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "synapse.tar.gz"
-            self._synapse_archive(path, commit, release=release)
-            prepare_inputs.validate_synapse_fork_archive(path, commit, release)
-            self._synapse_archive(path, commit, release=release, unsafe_link=True)
+            root = f"TeleCrypt-io-synapse-{commit[:7]}"
+            self._synapse_archive(path, commit)
+            prepare_inputs.validate_synapse_fork_archive(path, root)
+            self._synapse_archive(path, commit, unsafe_link=True)
             with self.assertRaises(SystemExit):
-                prepare_inputs.validate_synapse_fork_archive(path, commit, release)
+                prepare_inputs.validate_synapse_fork_archive(path, root)
+            self._synapse_archive(path, commit, second_root=True)
+            with self.assertRaises(SystemExit):
+                prepare_inputs.validate_synapse_fork_archive(path, root)
+            self._synapse_archive(path, commit)
+            with self.assertRaises(SystemExit):
+                prepare_inputs.validate_synapse_fork_archive(
+                    path, "TeleCrypt-io-synapse-bbbbbbb"
+                )
 
     def test_no_network_input_paths_and_build_args_use_the_same_locked_names(self) -> None:
         values = validate_provenance.load_lock(ROOT / "provenance.lock")
@@ -115,6 +127,8 @@ class ProvenanceTests(unittest.TestCase):
             self.assertIn(name, dockerfile)
         self.assertIn('synapse-${SYNAPSE_FORK_RELEASE}.tar.gz', dockerfile)
         self.assertIn('synapse-s3-storage-provider-${S3_PROVIDER_FORK_RELEASE}.tar.gz', dockerfile)
+        self.assertIn("--strip-components=1", dockerfile)
+        self.assertNotIn("synapse-${SYNAPSE_FORK_RELEASE}/synapse", dockerfile)
         self.assertIn(synapse_name, f"synapse-{values['SYNAPSE_FORK_RELEASE']}.tar.gz")
         self.assertIn(provider_name, f"synapse-s3-storage-provider-{values['S3_PROVIDER_FORK_RELEASE']}.tar.gz")
         self.assertNotIn("matrix-org/synapse-s3-storage-provider", workflow + dockerfile)

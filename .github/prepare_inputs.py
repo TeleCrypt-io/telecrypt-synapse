@@ -422,7 +422,7 @@ def validate_fork_release(metadata: dict, repository: str, release: str) -> None
         fail(f"{repository} fork release is not the exact immutable source-only contract")
 
 
-def fetch_fork_release(repository: str, release: str, expected_commit: str) -> str:
+def fetch_fork_release(repository: str, release: str, expected_commit: str) -> tuple[str, str]:
     metadata = fetch_github_api(
         repository,
         f"releases/tags/{release}",
@@ -430,8 +430,9 @@ def fetch_fork_release(repository: str, release: str, expected_commit: str) -> s
         f"{repository} fork release",
     )
     validate_fork_release(metadata, repository, release)
-    fetch_fork_annotated_tag(repository, release, expected_commit)
-    return metadata["tarball_url"]
+    annotated_tag_sha = fetch_fork_annotated_tag(repository, release, expected_commit)
+    archive_root = f"{repository.replace('/', '-')}-{annotated_tag_sha[:7]}"
+    return metadata["tarball_url"], archive_root
 
 
 def validate_controlplane_assets(
@@ -534,7 +535,7 @@ def validate_controlplane_digest(
         fail("Controlplane digest JSON does not contain an exact image digest")
 
 
-def validate_provider_build_contract(path: Path) -> None:
+def validate_provider_build_contract(path: Path, expected_root: str) -> None:
     try:
         with tarfile.open(path, mode="r:gz") as archive:
             names = []
@@ -593,18 +594,24 @@ def validate_provider_build_contract(path: Path) -> None:
     pyproject_files = [
         name for name in names if name.endswith("/pyproject.toml") or name == "pyproject.toml"
     ]
-    if len(setup_files) != 1 or pyproject_files:
+    roots = {name.split("/", 1)[0] for name in seen_names}
+    if len(roots) != 1:
+        fail("provider source archive must contain exactly one project root")
+    root = next(iter(roots))
+    if root != expected_root or root not in seen_names or root in seen_files:
+        fail("provider source archive project root is not an explicit directory")
+    if setup_files != [f"{root}/setup.py"] or pyproject_files:
         fail(
             "provider source archive must expose exactly one setup.py and no pyproject.toml "
             "for the reviewed base setuptools build contract"
         )
 
 
-def validate_synapse_fork_archive(path: Path, commit: str, release: str | None = None) -> None:
+def validate_synapse_fork_archive(path: Path, expected_root: str) -> None:
     """Validate the bounded, safe source archive used for the Synapse overlay."""
 
-    expected_root = f"synapse-{release or commit}"
     names: set[str] = set()
+    directories: set[str] = set()
     regular_files: set[str] = set()
     links: list[tuple[str, str]] = []
     total_uncompressed_bytes = 0
@@ -635,6 +642,7 @@ def validate_synapse_fork_archive(path: Path, commit: str, release: str | None =
                 if member.isdir():
                     if member.size != 0:
                         fail("Synapse fork archive directory has nonzero size")
+                    directories.add(name.removesuffix("/"))
                 elif member.isfile():
                     if member.size < 0:
                         fail("Synapse fork archive contains a negative file size")
@@ -656,13 +664,17 @@ def validate_synapse_fork_archive(path: Path, commit: str, release: str | None =
     except (OSError, EOFError, tarfile.TarError) as exc:
         fail(f"Synapse fork archive is not readable: {exc}")
 
-    if expected_root not in names or f"{expected_root}/pyproject.toml" not in regular_files:
+    roots = {name.split("/", 1)[0] for name in names}
+    if len(roots) != 1:
+        fail("Synapse fork archive must contain exactly one project root")
+    root = next(iter(roots))
+    if root != expected_root or root not in directories or f"{root}/pyproject.toml" not in regular_files:
         fail("Synapse fork archive does not contain the expected project root")
-    if f"{expected_root}/synapse/__init__.py" not in regular_files:
+    if f"{root}/synapse/__init__.py" not in regular_files:
         fail("Synapse fork archive does not contain the expected Synapse package")
     for name, linkname in links:
         target = posixpath.normpath(posixpath.join(posixpath.dirname(name), linkname))
-        if not target.startswith(f"{expected_root}/") or target not in names:
+        if not target.startswith(f"{root}/") or target not in names:
             fail(f"Synapse fork archive symlink escapes its project root: {name}")
 
 
@@ -743,12 +755,12 @@ def main() -> None:
     )
     validate_wheelhouse(wheelhouse, expected)
 
-    synapse_archive_url = fetch_fork_release(
+    synapse_archive_url, synapse_archive_root = fetch_fork_release(
         SYNAPSE_FORK_REPOSITORY,
         args.synapse_fork_release,
         args.synapse_fork_commit,
     )
-    provider_archive_url = fetch_fork_release(
+    provider_archive_url, provider_archive_root = fetch_fork_release(
         S3_PROVIDER_FORK_REPOSITORY,
         args.s3_provider_fork_release,
         args.s3_provider_fork_commit,
@@ -761,7 +773,7 @@ def main() -> None:
         expected_host="api.github.com",
         accept=GITHUB_API_ACCEPT,
     )
-    validate_synapse_fork_archive(args.output / synapse_archive, args.synapse_fork_commit, args.synapse_fork_release)
+    validate_synapse_fork_archive(args.output / synapse_archive, synapse_archive_root)
 
     archive = s3_provider_fork_archive_name(args.s3_provider_fork_release)
     download(
@@ -771,7 +783,7 @@ def main() -> None:
         expected_host="api.github.com",
         accept=GITHUB_API_ACCEPT,
     )
-    validate_provider_build_contract(args.output / archive)
+    validate_provider_build_contract(args.output / archive, provider_archive_root)
 
     wheel = f"telecrypt_tier_controller-{args.controlplane_release}-py3-none-any.whl"
     metadata = fetch_controlplane_release(args.controlplane_release)

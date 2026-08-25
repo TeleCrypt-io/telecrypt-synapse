@@ -82,11 +82,11 @@ RUN --mount=type=bind,source=s3-provider.lock,target=/tmp/s3-provider.lock,reado
       --require-hashes \
       --requirement /tmp/s3-provider-artifacts.lock; \
     mkdir -p /tmp/telecrypt-synapse-fork; \
-    tar --extract --file="${synapse_archive_path}" --directory=/tmp/telecrypt-synapse-fork --no-same-owner --no-same-permissions; \
+    tar --extract --file="${synapse_archive_path}" --directory=/tmp/telecrypt-synapse-fork --strip-components=1 --no-same-owner --no-same-permissions; \
     synapse_site="$(python3 -c 'import importlib.util; spec=importlib.util.find_spec("synapse"); print(next(iter(spec.submodule_search_locations)) if spec and spec.submodule_search_locations else "")')"; \
     test -n "${synapse_site}"; \
-    test -d "/tmp/telecrypt-synapse-fork/synapse-${SYNAPSE_FORK_RELEASE}/synapse"; \
-    cp -a "/tmp/telecrypt-synapse-fork/synapse-${SYNAPSE_FORK_RELEASE}/synapse/." "${synapse_site}/"; \
+    test -d /tmp/telecrypt-synapse-fork/synapse; \
+    cp -a /tmp/telecrypt-synapse-fork/synapse/. "${synapse_site}/"; \
     rm -rf /tmp/telecrypt-synapse-fork; \
     pip3 check; \
     python3 -c 'import importlib.metadata as m, pathlib, sys; expected={}; [expected.__setitem__(line.split("==", 1)[0].lower().replace("_", "-"), line.split("==", 1)[1].split()[0]) for line in pathlib.Path("/tmp/s3-provider.lock").read_text().splitlines() if line and not line.startswith("#")]; expected.update({"matrix-synapse":sys.argv[1], "synapse-s3-storage-provider":sys.argv[2], "telecrypt-tier-controller":sys.argv[3]}); actual={name:m.version(name) for name in expected}; assert actual == expected, (expected, actual)' "${SYNAPSE_VERSION}" "${S3_PROVIDER_VERSION}" "${CONTROLPLANE_RELEASE}"; \

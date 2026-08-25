@@ -324,7 +324,10 @@ class PrepareInputsTests(unittest.TestCase):
                 prepare_inputs.fetch_fork_release(
                     FORK_REPOSITORY, FORK_RELEASE, FORK_SOURCE_COMMIT
                 ),
-                f"https://api.github.com/repos/{FORK_REPOSITORY}/tarball/{FORK_RELEASE}",
+                (
+                    f"https://api.github.com/repos/{FORK_REPOSITORY}/tarball/{FORK_RELEASE}",
+                    f"TeleCrypt-io-synapse-{FORK_ANNOTATED_TAG_SHA[:7]}",
+                ),
             )
         with mock.patch.object(
             prepare_inputs,
@@ -410,12 +413,25 @@ class PrepareInputsTests(unittest.TestCase):
             [("hardlink", "provider/link")],
             [("fifo", "provider/fifo")],
         )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "provider.tar.gz"
+            path.write_bytes(
+                archive(
+                    [
+                        ("directory", "TeleCrypt-io-synapse-s3-storage-provider-d8bb991"),
+                        ("file", "TeleCrypt-io-synapse-s3-storage-provider-d8bb991/setup.py"),
+                    ]
+                )
+            )
+            prepare_inputs.validate_provider_build_contract(
+                path, "TeleCrypt-io-synapse-s3-storage-provider-d8bb991"
+            )
         for entries in invalid_entries:
             with tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "provider.tar.gz"
                 path.write_bytes(archive(entries))
                 with self.assertRaises(SystemExit, msg=entries):
-                    prepare_inputs.validate_provider_build_contract(path)
+                    prepare_inputs.validate_provider_build_contract(path, "provider")
 
         class FakeMember:
             def __init__(self, name: str, size: int = 0) -> None:
@@ -447,7 +463,9 @@ class PrepareInputsTests(unittest.TestCase):
         ):
             with mock.patch.object(prepare_inputs.tarfile, "open", return_value=FakeArchive(members)):
                 with self.assertRaises(SystemExit):
-                    prepare_inputs.validate_provider_build_contract(Path("unused.tar.gz"))
+                    prepare_inputs.validate_provider_build_contract(
+                        Path("unused.tar.gz"), "provider"
+                    )
 
     def test_publish_release_rejects_noncanonical_record_before_network(self) -> None:
         publish_record = record(tag="1.159-tc3")
