@@ -348,31 +348,58 @@ jobs:
             cat -- "$stdout_file"
             rm -f -- "$stdout_file" "$stderr_file"
           }
+          image_contract_failures=0
+          check_image_value() {
+            local description="$1" format="$2" expected="$3" actual
+            if ! actual="$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" "$format")"; then
+              printf 'image contract inspection failed (%s)\n' "$description" >&2
+              image_contract_failures=$((image_contract_failures + 1))
+              return
+            fi
+            if [[ "$actual" != "$expected" ]]; then
+              printf 'image contract mismatch (%s): expected %q, got %q\n' \
+                "$description" "$expected" "$actual" >&2
+              image_contract_failures=$((image_contract_failures + 1))
+            fi
+          }
+          check_image_non_null() {
+            local description="$1" format="$2" actual
+            if ! actual="$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" "$format")"; then
+              printf 'image contract inspection failed (%s)\n' "$description" >&2
+              image_contract_failures=$((image_contract_failures + 1))
+              return
+            fi
+            if [[ "$actual" == "null" ]]; then
+              printf 'image contract mismatch (%s): value must not be null\n' "$description" >&2
+              image_contract_failures=$((image_contract_failures + 1))
+            fi
+          }
           test -s "$IMAGE_ARCHIVE"
           test "$(stat -c '%s' "$IMAGE_ARCHIVE")" -le $((1024 * 1024 * 1024))
           "$GITHUB_WORKSPACE/.github/load_image_bounded.sh" "$IMAGE_ARCHIVE"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.opencontainers.image.source"}}')" = "https://github.com/TeleCrypt-io/telecrypt-synapse"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.opencontainers.image.licenses"}}')" = "BUSL-1.1"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$IMAGE_TAG"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.opencontainers.image.base.name"}}')" = "ghcr.io/element-hq/synapse"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.opencontainers.image.base.version"}}')" = "v${{ needs.versions.outputs.synapse_version }}"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.opencontainers.image.base.digest"}}')" = "${{ steps.base.outputs.digest }}"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{.Config.User}}')" = "991:991"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{json .Config.Entrypoint}}')" = '["/telecrypt-synapse-entrypoint"]'
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{json .Config.Cmd}}')" != "null"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.telecrypt.s3-provider.version"}}')" = "${{ needs.versions.outputs.s3_provider_version }}"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.telecrypt.s3-provider.archive.sha256"}}')" = "${{ needs.versions.outputs.s3_provider_archive_sha256 }}"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.telecrypt.s3-provider.upstream.commit"}}')" = "${{ needs.versions.outputs.s3_provider_upstream_commit }}"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.telecrypt.s3-provider.fork.release"}}')" = "${{ needs.versions.outputs.s3_provider_fork_release }}"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.telecrypt.s3-provider.fork.commit"}}')" = "${{ needs.versions.outputs.s3_provider_fork_commit }}"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.telecrypt.s3-provider.fork.archive.sha256"}}')" = "${{ needs.versions.outputs.s3_provider_fork_archive_sha256 }}"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.telecrypt.synapse.upstream.commit"}}')" = "${{ needs.versions.outputs.synapse_upstream_commit }}"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.telecrypt.synapse.fork.release"}}')" = "${{ needs.versions.outputs.synapse_fork_release }}"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.telecrypt.synapse.fork.commit"}}')" = "${{ needs.versions.outputs.synapse_fork_commit }}"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.telecrypt.synapse.fork.archive.sha256"}}')" = "${{ needs.versions.outputs.synapse_fork_archive_sha256 }}"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.telecrypt.controlplane.release"}}')" = "${{ needs.versions.outputs.controlplane_release }}"
-          test "$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" '{{index .Config.Labels "org.telecrypt.controlplane.wheel.sha256"}}')" = "${{ needs.versions.outputs.controlplane_wheel_sha256 }}"
+          check_image_value source '{{index .Config.Labels "org.opencontainers.image.source"}}' "https://github.com/TeleCrypt-io/telecrypt-synapse"
+          check_image_value license '{{index .Config.Labels "org.opencontainers.image.licenses"}}' "BUSL-1.1"
+          check_image_value version '{{index .Config.Labels "org.opencontainers.image.version"}}' "$IMAGE_TAG"
+          check_image_value revision '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$GITHUB_SHA"
+          check_image_value base-name '{{index .Config.Labels "org.opencontainers.image.base.name"}}' "ghcr.io/element-hq/synapse"
+          check_image_value base-version '{{index .Config.Labels "org.opencontainers.image.base.version"}}' "v${{ needs.versions.outputs.synapse_version }}"
+          check_image_value base-digest '{{index .Config.Labels "org.opencontainers.image.base.digest"}}' "${{ steps.base.outputs.digest }}"
+          check_image_value user '{{.Config.User}}' "991:991"
+          check_image_value entrypoint '{{json .Config.Entrypoint}}' '["/telecrypt-synapse-entrypoint"]'
+          check_image_non_null command '{{json .Config.Cmd}}'
+          check_image_value s3-version '{{index .Config.Labels "org.telecrypt.s3-provider.version"}}' "${{ needs.versions.outputs.s3_provider_version }}"
+          check_image_value s3-archive '{{index .Config.Labels "org.telecrypt.s3-provider.archive.sha256"}}' "${{ needs.versions.outputs.s3_provider_archive_sha256 }}"
+          check_image_value s3-upstream '{{index .Config.Labels "org.telecrypt.s3-provider.upstream.commit"}}' "${{ needs.versions.outputs.s3_provider_upstream_commit }}"
+          check_image_value s3-fork-release '{{index .Config.Labels "org.telecrypt.s3-provider.fork.release"}}' "${{ needs.versions.outputs.s3_provider_fork_release }}"
+          check_image_value s3-fork-commit '{{index .Config.Labels "org.telecrypt.s3-provider.fork.commit"}}' "${{ needs.versions.outputs.s3_provider_fork_commit }}"
+          check_image_value s3-fork-archive '{{index .Config.Labels "org.telecrypt.s3-provider.fork.archive.sha256"}}' "${{ needs.versions.outputs.s3_provider_fork_archive_sha256 }}"
+          check_image_value synapse-upstream '{{index .Config.Labels "org.telecrypt.synapse.upstream.commit"}}' "${{ needs.versions.outputs.synapse_upstream_commit }}"
+          check_image_value synapse-fork-release '{{index .Config.Labels "org.telecrypt.synapse.fork.release"}}' "${{ needs.versions.outputs.synapse_fork_release }}"
+          check_image_value synapse-fork-commit '{{index .Config.Labels "org.telecrypt.synapse.fork.commit"}}' "${{ needs.versions.outputs.synapse_fork_commit }}"
+          check_image_value synapse-fork-archive '{{index .Config.Labels "org.telecrypt.synapse.fork.archive.sha256"}}' "${{ needs.versions.outputs.synapse_fork_archive_sha256 }}"
+          check_image_value controlplane-release '{{index .Config.Labels "org.telecrypt.controlplane.release"}}' "${{ needs.versions.outputs.controlplane_release }}"
+          check_image_value controlplane-wheel '{{index .Config.Labels "org.telecrypt.controlplane.wheel.sha256"}}' "${{ needs.versions.outputs.controlplane_wheel_sha256 }}"
+          ((image_contract_failures == 0))
           timeout --signal=TERM --kill-after=5s 2m docker run --rm --network none \
             -v "$GITHUB_WORKSPACE/.github/image_smoke.py:/tmp/image_smoke.py:ro" \
             --env EXPECTED_SYNAPSE_VERSION="${{ needs.versions.outputs.synapse_version }}" \
