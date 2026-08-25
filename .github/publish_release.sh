@@ -203,18 +203,33 @@ else
   else
     create_status=$?
   fi
-  if ! get_release; then
-    cat -- "$release_json.create.log" "$release_json.create.error" >&2
-    echo 'release draft could not be read back after creation' >&2
-    exit 1
-  fi
   if [[ "$create_status" -ne 0 || -s "$release_json.create.error" ]]; then
     cat -- "$release_json.create.log" "$release_json.create.error" >&2
     printf 'release draft creation failed (status %s)\n' "$create_status" >&2
     exit 1
   fi
+  if ! create_code="$(http_status "$release_json.create.log")" || [[ "$create_code" != 201 ]]; then
+    cat -- "$release_json.create.log" "$release_json.create.error" >&2
+    echo 'release draft creation did not return one HTTP 201 response' >&2
+    exit 1
+  fi
+  if ! http_body "$release_json.create.log" >"$release_json" \
+    || ! release_id="$(jq -er '.id | select(type == "number" and . > 0 and . == floor)' "$release_json")"; then
+    cat -- "$release_json.create.log" "$release_json.create.error" >&2
+    echo 'release draft creation response has no valid numeric id' >&2
+    exit 1
+  fi
   if ! check_draft; then
     echo 'created release draft does not match the exact empty-draft contract' >&2
+    exit 1
+  fi
+  if ! get_release_by_id; then
+    cat -- "$release_error" >&2
+    echo 'created release draft could not be read back by its numeric id' >&2
+    exit 1
+  fi
+  if ! check_draft; then
+    echo 'created release draft readback differs from the exact empty-draft contract' >&2
     exit 1
   fi
 fi
@@ -238,7 +253,7 @@ if [[ "$asset_count" -eq 0 ]]; then
     exit 1
   fi
 fi
-if ! get_release; then
+if ! get_release_by_id; then
   cat -- "$release_error" >&2
   echo 'release draft could not be read back after asset upload' >&2
   exit 1
@@ -281,7 +296,7 @@ if bounded_command "$MAX_COMMAND_BYTES" "$release_json.edit.log" "$release_json.
 else
   edit_status=$?
 fi
-if ! get_release; then
+if ! get_release_by_id; then
   cat -- "$release_json.edit.log" "$release_json.edit.error" "$release_error" >&2
   printf 'published release could not be read back after PATCH (status %s)\n' "$edit_status" >&2
   exit 1

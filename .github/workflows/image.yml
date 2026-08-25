@@ -445,6 +445,11 @@ jobs:
       - name: Download the tested image archive and checksum
         uses: actions/download-artifact@v8.0.1
         timeout-minutes: 5
+        # v8.0.1 is the current exact upstream release but its bundled runtime still emits
+        # Node DEP0005 while transporting large artifacts. Keep suppression scoped to this
+        # third-party action; all TeleCrypt commands retain strict diagnostic handling.
+        env:
+          NODE_OPTIONS: --no-deprecation
         with:
           name: telecrypt-synapse-image-${{ needs.versions.outputs.image_tag }}
           path: ${{ runner.temp }}/telecrypt-synapse-image-artifact

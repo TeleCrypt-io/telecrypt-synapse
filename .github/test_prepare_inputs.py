@@ -619,9 +619,11 @@ class PrepareInputsTests(unittest.TestCase):
                 "           'draft': not state['published'], 'prerelease': False,\n"
                 "           'immutable': state['published'], 'assets': [asset] if state['asset'] else []}\n"
                 "if endpoint.endswith('releases?per_page=100&page=1'):\n"
-                "    response, status = ([release] if state['exists'] else []), 200\n"
+                "    delayed = os.environ.get('FAKE_CREATE_LIST_DELAY') and state.get('created')\n"
+                "    response, status = ([release] if state['exists'] and not delayed else []), 200\n"
                 "elif endpoint == 'repos/TeleCrypt-io/telecrypt-synapse/releases' and '--method' in args:\n"
                 "    state['exists'] = True\n"
+                "    state['created'] = True\n"
                 "    state_path.write_text(json.dumps(state), encoding='utf-8')\n"
                 "    response, status = release, 201\n"
                 "elif endpoint == 'repos/TeleCrypt-io/telecrypt-synapse/releases/123' and '--method' in args:\n"
@@ -694,6 +696,26 @@ class PrepareInputsTests(unittest.TestCase):
             endpoints = [value for call in calls for value in call if value.startswith(("repos/", "https://"))]
             self.assertTrue(any(value == "repos/TeleCrypt-io/telecrypt-synapse/releases" for value in endpoints))
             self.assertTrue(any(value.endswith("releases/123") for value in endpoints))
+
+            log.write_text("", encoding="utf-8")
+            state.write_text(json.dumps({"exists": False, "asset": False, "published": False}), encoding="utf-8")
+            result = self.run_publish_release(
+                payload,
+                RELEASE_ASSET_NAME="telecrypt-synapse-1.159-tc3.digest.json",
+                PATH=f"{directory}:{os.environ['PATH']}",
+                FAKE_GH_LOG=str(log),
+                FAKE_GH_STATE=str(state),
+                FAKE_CREATE_LIST_DELAY="1",
+            )
+            calls_text = log.read_text(encoding="utf-8") if log.exists() else "<no calls>"
+            self.assertEqual(result.returncode, 0, result.stderr + "\n" + calls_text)
+            calls = [json.loads(line) for line in calls_text.splitlines()]
+            list_calls = [
+                call for call in calls
+                if any("releases?per_page=100&page=1" in value for value in call)
+            ]
+            self.assertEqual(len(list_calls), 1)
+            self.assertTrue(any("releases/123" in value for call in calls for value in call))
 
             log.write_text("", encoding="utf-8")
             state.write_text(
@@ -829,6 +851,8 @@ class PrepareInputsTests(unittest.TestCase):
         self.assertNotRegex(script, r"ulimit\s+-f")
         self.assertIn("bounded-command.py", script)
         self.assertIn("start_new_session=True", (Path(__file__).resolve().parent / "bounded-command.py").read_text(encoding="utf-8"))
+        self.assertEqual(workflow.count("NODE_OPTIONS: --no-deprecation"), 1)
+        self.assertIn("uses: actions/download-artifact@v8.0.1", workflow)
 
     def test_synapse_release_contract_checks_identity_and_asset_digest(self) -> None:
         digest = "sha256:" + "d" * 64
