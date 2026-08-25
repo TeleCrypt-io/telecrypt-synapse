@@ -128,8 +128,20 @@ class ProvenanceTests(unittest.TestCase):
             self.assertIn(name, dockerfile)
         self.assertIn('synapse-${SYNAPSE_FORK_RELEASE}.tar.gz', dockerfile)
         self.assertIn(
-            "ghcr.io/element-hq/synapse:v${SYNAPSE_VERSION}@${SYNAPSE_BASE_DIGEST}",
+            "ARG SYNAPSE_BASE_REF=ghcr.io/element-hq/synapse:v0.0.0@sha256:"
+            + "0" * 64,
             dockerfile,
+        )
+        self.assertIn("FROM ${SYNAPSE_BASE_REF} AS runtime", dockerfile)
+        self.assertIn(
+            'test "${SYNAPSE_BASE_REF}" = "ghcr.io/element-hq/synapse:'
+            'v${SYNAPSE_VERSION}@${SYNAPSE_BASE_DIGEST}"',
+            dockerfile,
+        )
+        self.assertIn(
+            "SYNAPSE_BASE_REF=ghcr.io/element-hq/synapse:"
+            "v${{ needs.versions.outputs.synapse_version }}@${{ steps.base.outputs.digest }}",
+            workflow,
         )
         self.assertIn("SYNAPSE_BASE_DIGEST=${{ steps.base.outputs.digest }}", workflow)
         self.assertIn('synapse-s3-storage-provider-${S3_PROVIDER_FORK_RELEASE}.tar.gz', dockerfile)
