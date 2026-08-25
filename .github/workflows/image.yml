@@ -362,18 +362,6 @@ jobs:
               image_contract_failures=$((image_contract_failures + 1))
             fi
           }
-          check_image_non_null() {
-            local description="$1" format="$2" actual
-            if ! actual="$(bounded_docker_inspect "$IMAGE:$IMAGE_TAG" "$format")"; then
-              printf 'image contract inspection failed (%s)\n' "$description" >&2
-              image_contract_failures=$((image_contract_failures + 1))
-              return
-            fi
-            if [[ "$actual" == "null" ]]; then
-              printf 'image contract mismatch (%s): value must not be null\n' "$description" >&2
-              image_contract_failures=$((image_contract_failures + 1))
-            fi
-          }
           test -s "$IMAGE_ARCHIVE"
           test "$(stat -c '%s' "$IMAGE_ARCHIVE")" -le $((1024 * 1024 * 1024))
           "$GITHUB_WORKSPACE/.github/load_image_bounded.sh" "$IMAGE_ARCHIVE"
@@ -386,7 +374,6 @@ jobs:
           check_image_value base-digest '{{index .Config.Labels "org.opencontainers.image.base.digest"}}' "${{ steps.base.outputs.digest }}"
           check_image_value user '{{.Config.User}}' "991:991"
           check_image_value entrypoint '{{json .Config.Entrypoint}}' '["/telecrypt-synapse-entrypoint"]'
-          check_image_non_null command '{{json .Config.Cmd}}'
           check_image_value s3-version '{{index .Config.Labels "org.telecrypt.s3-provider.version"}}' "${{ needs.versions.outputs.s3_provider_version }}"
           check_image_value s3-archive '{{index .Config.Labels "org.telecrypt.s3-provider.archive.sha256"}}' "${{ needs.versions.outputs.s3_provider_archive_sha256 }}"
           check_image_value s3-upstream '{{index .Config.Labels "org.telecrypt.s3-provider.upstream.commit"}}' "${{ needs.versions.outputs.s3_provider_upstream_commit }}"

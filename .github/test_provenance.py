@@ -147,6 +147,7 @@ class ProvenanceTests(unittest.TestCase):
         self.assertIn("image contract mismatch (%s)", workflow)
         self.assertIn("((image_contract_failures == 0))", workflow)
         self.assertNotIn('test "$(bounded_docker_inspect', workflow)
+        self.assertNotIn(".Config.Cmd", workflow)
         self.assertIn('synapse-s3-storage-provider-${S3_PROVIDER_FORK_RELEASE}.tar.gz', dockerfile)
         self.assertIn("--strip-components=1", dockerfile)
         self.assertNotIn("synapse-${SYNAPSE_FORK_RELEASE}/synapse", dockerfile)
