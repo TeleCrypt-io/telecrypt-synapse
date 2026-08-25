@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import json
 import io
+import json
 import os
 import subprocess
 import tarfile
@@ -41,6 +41,18 @@ def record(**changes: object) -> bytes:
         "tag": RELEASE,
     }
     payload.update(changes)
+    return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def synapse_record(tag: str = "1.159-tc3") -> bytes:
+    payload = {
+        "annotated_tag_sha": ANNOTATED_TAG_SHA,
+        "digest": "sha256:" + "c" * 64,
+        "image": "ghcr.io/telecrypt-io/telecrypt-synapse",
+        "schema_version": 1,
+        "source_commit": SOURCE_COMMIT,
+        "tag": tag,
+    }
     return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
@@ -449,7 +461,15 @@ class PrepareInputsTests(unittest.TestCase):
             fake_gh.write_text(
                 "#!/bin/sh\n"
                 "printf '%s\\n' \"$*\" >> \"$FAKE_GH_LOG\"\n"
-                "if [ \"$1\" = api ]; then printf 'HTTP/1.1 200 OK\\n\\n'; cat \"$FAKE_GH_RESPONSE\"; exit 0; fi\n"
+                "if [ \"$1\" = api ]; then\n"
+                "  printf 'HTTP/1.1 200 OK\\n\\n'\n"
+                "  case \"$*\" in\n"
+                "    *'releases?per_page=100&page=1'*) printf '['; cat \"$FAKE_GH_RESPONSE\"; printf ']\\n';;\n"
+                "    *'releases/9'*) cat \"$FAKE_GH_RESPONSE\";;\n"
+                "    *) exit 98;;\n"
+                "  esac\n"
+                "  exit 0\n"
+                "fi\n"
                 "exit 99\n",
                 encoding="utf-8",
             )
@@ -468,8 +488,128 @@ class PrepareInputsTests(unittest.TestCase):
             self.assertEqual(log.read_text(encoding="utf-8").splitlines(), [
                 "api --include --hostname github.com --header Accept: application/vnd.github+json "
                 "--header X-GitHub-Api-Version: 2026-03-10 "
-                "repos/TeleCrypt-io/telecrypt-synapse/releases/tags/1.159-tc3",
+                "repos/TeleCrypt-io/telecrypt-synapse/releases?per_page=100&page=1",
+                "api --include --hostname github.com --header Accept: application/vnd.github+json "
+                "--header X-GitHub-Api-Version: 2026-03-10 "
+                "repos/TeleCrypt-io/telecrypt-synapse/releases/9",
             ])
+
+    def test_publish_release_reuses_numeric_draft_and_uses_numeric_mutations(self) -> None:
+        payload = synapse_record()
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            fake_gh = directory_path / "gh"
+            log = directory_path / "gh.log"
+            state = directory_path / "state.json"
+            state.write_text(json.dumps({"exists": True, "asset": False, "published": False}), encoding="utf-8")
+            fake_gh.write_text(
+                "#!/usr/bin/env python3\n"
+                "import hashlib, json, os, sys\n"
+                "from pathlib import Path\n"
+                "args = sys.argv[1:]\n"
+                "with Path(os.environ['FAKE_GH_LOG']).open('a', encoding='utf-8') as output:\n"
+                "    output.write(json.dumps(args) + '\\n')\n"
+                "endpoint = next((value for value in args if value.startswith(('repos/', 'https://'))), '')\n"
+                "state_path = Path(os.environ['FAKE_GH_STATE'])\n"
+                "state = json.loads(state_path.read_text(encoding='utf-8'))\n"
+                "record = Path(os.environ['RELEASE_RECORD']).read_bytes()\n"
+                "asset = {'id': 321, 'name': os.environ['RELEASE_ASSET_NAME'], 'label': None,\n"
+                "         'state': 'uploaded', 'size': len(record),\n"
+                "         'digest': 'sha256:' + hashlib.sha256(record).hexdigest()}\n"
+                "release = {'id': 123, 'tag_name': os.environ['EXPECTED_TAG'],\n"
+                "           'name': os.environ['EXPECTED_TAG'],\n"
+                "           'body': 'Exact Synapse release for source commit ' + os.environ['EXPECTED_SHA'] + '.',\n"
+                "           'draft': not state['published'], 'prerelease': False,\n"
+                "           'immutable': state['published'], 'assets': [asset] if state['asset'] else []}\n"
+                "if endpoint.endswith('releases?per_page=100&page=1'):\n"
+                "    response, status = ([release] if state['exists'] else []), 200\n"
+                "elif endpoint == 'repos/TeleCrypt-io/telecrypt-synapse/releases' and '--method' in args:\n"
+                "    state['exists'] = True\n"
+                "    state_path.write_text(json.dumps(state), encoding='utf-8')\n"
+                "    response, status = release, 201\n"
+                "elif endpoint == 'repos/TeleCrypt-io/telecrypt-synapse/releases/123' and '--method' in args:\n"
+                "    state['published'] = True\n"
+                "    state_path.write_text(json.dumps(state), encoding='utf-8')\n"
+                "    release['draft'] = False\n"
+                "    release['immutable'] = True\n"
+                "    response, status = release, 200\n"
+                "elif endpoint == 'repos/TeleCrypt-io/telecrypt-synapse/releases/123':\n"
+                "    response, status = release, 200\n"
+                "elif endpoint == 'https://uploads.github.com/repos/TeleCrypt-io/telecrypt-synapse/releases/123/assets?name=' + os.environ['RELEASE_ASSET_NAME']:\n"
+                "    state['asset'] = True\n"
+                "    state_path.write_text(json.dumps(state), encoding='utf-8')\n"
+                "    response, status = asset, 201\n"
+                "elif endpoint == 'repos/TeleCrypt-io/telecrypt-synapse/releases/assets/321':\n"
+                "    sys.stdout.buffer.write(record)\n"
+                "    raise SystemExit(0)\n"
+                "else:\n"
+                "    raise SystemExit('unexpected endpoint: ' + endpoint)\n"
+                "if '--include' in args:\n"
+                "    sys.stdout.write('HTTP/1.1 ' + str(status) + ' OK\\n\\n')\n"
+                "json.dump(response, sys.stdout, separators=(',', ':'))\n"
+                "sys.stdout.write('\\n')\n",
+                encoding="utf-8",
+            )
+            fake_gh.chmod(0o755)
+            result = self.run_publish_release(
+                payload,
+                RELEASE_ASSET_NAME="telecrypt-synapse-1.159-tc3.digest.json",
+                PATH=f"{directory}:{os.environ['PATH']}",
+                FAKE_GH_LOG=str(log),
+                FAKE_GH_STATE=str(state),
+            )
+            calls_text = log.read_text(encoding="utf-8") if log.exists() else "<no calls>"
+            self.assertEqual(result.returncode, 0, result.stderr + "\n" + calls_text)
+            calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+            endpoints = [value for call in calls for value in call if value.startswith(("repos/", "https://"))]
+            self.assertTrue(any("releases?per_page=100&page=1" in value for value in endpoints))
+            self.assertTrue(any(value.endswith("releases/123") for value in endpoints))
+            self.assertTrue(any(value == "https://uploads.github.com/repos/TeleCrypt-io/telecrypt-synapse/releases/123/assets?name=telecrypt-synapse-1.159-tc3.digest.json" for value in endpoints))
+            self.assertFalse(any(value.startswith("repos/TeleCrypt-io/telecrypt-synapse/releases/123/assets?name=") for value in endpoints))
+            self.assertFalse(any(value == "uploads.github.com" for call in calls for value in call))
+            self.assertTrue(any(value.endswith("releases/assets/321") for value in endpoints))
+            self.assertFalse(any("releases/tags/" in value for value in endpoints))
+            self.assertFalse(any(value == "repos/TeleCrypt-io/telecrypt-synapse/releases" for value in endpoints))
+
+            log.write_text("", encoding="utf-8")
+            state.write_text(json.dumps({"exists": False, "asset": False, "published": False}), encoding="utf-8")
+            result = self.run_publish_release(
+                payload,
+                RELEASE_ASSET_NAME="telecrypt-synapse-1.159-tc3.digest.json",
+                PATH=f"{directory}:{os.environ['PATH']}",
+                FAKE_GH_LOG=str(log),
+                FAKE_GH_STATE=str(state),
+            )
+            calls_text = log.read_text(encoding="utf-8") if log.exists() else "<no calls>"
+            self.assertEqual(result.returncode, 0, result.stderr + "\n" + calls_text)
+            calls = [json.loads(line) for line in calls_text.splitlines()]
+            endpoints = [value for call in calls for value in call if value.startswith(("repos/", "https://"))]
+            self.assertTrue(any(value == "repos/TeleCrypt-io/telecrypt-synapse/releases" for value in endpoints))
+            self.assertTrue(any(value.endswith("releases/123") for value in endpoints))
+
+    def test_publish_release_fails_closed_on_duplicate_exact_tag_matches(self) -> None:
+        payload = synapse_record()
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            fake_gh = directory_path / "gh"
+            log = directory_path / "gh.log"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"$FAKE_GH_LOG\"\n"
+                "printf 'HTTP/1.1 200 OK\\n\\n'\n"
+                "printf '[{\"id\":123,\"tag_name\":\"1.159-tc3\"},{\"id\":124,\"tag_name\":\"1.159-tc3\"}]\\n'\n",
+                encoding="utf-8",
+            )
+            fake_gh.chmod(0o755)
+            result = self.run_publish_release(
+                payload,
+                RELEASE_ASSET_NAME="telecrypt-synapse-1.159-tc3.digest.json",
+                PATH=f"{directory}:{os.environ['PATH']}",
+                FAKE_GH_LOG=str(log),
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("releases/123", log.read_text(encoding="utf-8"))
+            self.assertNotIn("releases/124", log.read_text(encoding="utf-8"))
 
     def test_publish_release_uses_machine_http_status_and_rejects_oversize_api_output(self) -> None:
         payload = record(tag="1.159-tc3")
