@@ -466,7 +466,7 @@ def validate_controlplane_assets(
     ):
         if asset.get("state") != "uploaded":
             fail(f"Controlplane {label} asset is not uploaded")
-        if "label" not in asset or asset.get("label") is not None:
+        if "label" not in asset or asset.get("label") != "":
             fail(f"Controlplane {label} asset has an unexpected label")
         if asset.get("browser_download_url") != expected_url:
             fail(f"Controlplane {label} asset URL is not the exact release URL")

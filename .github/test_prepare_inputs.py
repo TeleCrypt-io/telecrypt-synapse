@@ -65,7 +65,7 @@ def asset(name: str, asset_id: int, size: int, digest: str) -> dict[str, object]
         "name": name,
         "size": size,
         "digest": f"sha256:{digest}",
-        "label": None,
+        "label": "",
         "state": "uploaded",
         "created_at": "2026-08-22T00:00:01Z",
         "updated_at": "2026-08-22T00:00:02Z",
@@ -343,6 +343,8 @@ class PrepareInputsTests(unittest.TestCase):
     def test_asset_state_and_api_url_are_exact(self) -> None:
         for field, value in (
             ("state", "new"),
+            ("label", None),
+            ("label", "unexpected"),
             (
                 "url",
                 "https://api.github.com/repos/TeleCrypt-io/controlplane/releases/assets/9",
