@@ -863,7 +863,10 @@ class PrepareInputsTests(unittest.TestCase):
             "buildx.build.provenance": {
                 "materials": [
                     {
-                        "uri": "pkg:docker/ghcr.io/element-hq/synapse@v1.159.0?platform=linux%2Famd64",
+                        "uri": (
+                            "pkg:docker/ghcr.io/element-hq/synapse@v1.159.0"
+                            f"?digest={digest}&platform=linux%2Famd64"
+                        ),
                         "digest": {"sha256": "3" * 64},
                     }
                 ]
@@ -873,6 +876,15 @@ class PrepareInputsTests(unittest.TestCase):
             metadata, "ghcr.io/element-hq/synapse:v1.159.0", digest
         )
         metadata["buildx.build.provenance"]["materials"][0]["digest"]["sha256"] = "4" * 64
+        with self.assertRaises(SystemExit):
+            verify_base_provenance.validate_metadata(
+                metadata, "ghcr.io/element-hq/synapse:v1.159.0", digest
+            )
+        metadata["buildx.build.provenance"]["materials"][0]["digest"]["sha256"] = "3" * 64
+        metadata["buildx.build.provenance"]["materials"][0]["uri"] = (
+            "pkg:docker/ghcr.io/element-hq/synapse@v1.159.0"
+            f"?digest={'sha256:' + '4' * 64}&platform=linux%2Famd64"
+        )
         with self.assertRaises(SystemExit):
             verify_base_provenance.validate_metadata(
                 metadata, "ghcr.io/element-hq/synapse:v1.159.0", digest

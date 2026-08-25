@@ -70,7 +70,7 @@ def validate_v02_materials(
         fail("BuildKit v0.2 provenance has no materials list")
     expected_uris = {
         f"pkg:docker/{image}@{expected_digest}",
-        f"pkg:docker/{image}@{tag}?platform=linux%2Famd64",
+        f"pkg:docker/{image}@{tag}?digest={expected_digest}&platform=linux%2Famd64",
         f"docker-image://{image}@{expected_digest}",
     }
     base_materials = [
