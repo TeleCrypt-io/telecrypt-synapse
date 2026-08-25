@@ -9,8 +9,10 @@ readonly REPOSITORY='TeleCrypt-io/telecrypt-synapse'
 readonly REMOTE='https://github.com/TeleCrypt-io/telecrypt-synapse.git'
 readonly REMOTE_WITHOUT_SUFFIX='https://github.com/TeleCrypt-io/telecrypt-synapse'
 readonly MAX_GIT_OUTPUT_BYTES=$((64 * 1024))
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-readonly TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/telecrypt-git.XXXXXX")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/telecrypt-git.XXXXXX")"
+readonly TEMP_ROOT
 cleanup() { rm -rf -- "$TEMP_ROOT"; }
 trap cleanup EXIT
 trap 'cleanup; exit 143' HUP INT TERM

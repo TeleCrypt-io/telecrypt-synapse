@@ -12,6 +12,7 @@ shift 5
 [[ $# -gt 0 ]] || exit 64
 
 temporary="$(mktemp -d)"
+# shellcheck disable=SC2317 # invoked indirectly by the traps below
 cleanup() { rm -rf -- "$temporary"; }
 trap cleanup EXIT
 trap 'cleanup; exit 143' HUP INT TERM

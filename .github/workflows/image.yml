@@ -77,6 +77,10 @@ jobs:
         run: PYTHONDONTWRITEBYTECODE=1 python3 .github/test_prepare_inputs.py
       - name: Run the offline registry image verifier tests
         run: PYTHONDONTWRITEBYTECODE=1 python3 .github/test_verify_registry_image.py
+      - name: Run the offline bounded diagnostics tests
+        run: PYTHONDONTWRITEBYTECODE=1 python3 .github/test_bounded_diagnostics.py
+      - name: Run the offline package tag classifier tests
+        run: PYTHONDONTWRITEBYTECODE=1 python3 .github/test_classify_registry_tag.py
       - name: Run the offline bounded Git fetch tests
         run: PYTHONDONTWRITEBYTECODE=1 python3 .github/test_strict_git_fetch.py
       - id: version
@@ -200,14 +204,14 @@ jobs:
           if ! bash .github/run_bounded_command.sh \
             $((1024 * 1024)) $((64 * 1024)) "$manifest" "$diagnostics" 90 \
             docker manifest inspect --verbose "$BASE_REF"; then
+            cat -- "$diagnostics" >&2
             echo "could not inspect the current upstream tag: $BASE_REF" >&2
             exit 1
           fi
           test "$(wc -c < "$manifest")" -le $((1024 * 1024))
           test "$(wc -c < "$diagnostics")" -le $((64 * 1024))
-          if [ -s "$diagnostics" ]; then
-            cat -- "$diagnostics" >&2
-            echo "upstream base inspection emitted unexpected diagnostics" >&2
+          if ! bash .github/check_bounded_diagnostics.sh "$diagnostics" $((64 * 1024)); then
+            echo "upstream base inspection emitted warning or error diagnostics" >&2
             exit 1
           fi
           base_digest="$(jq -er '
@@ -235,12 +239,15 @@ jobs:
             docker pull --quiet --platform linux/amd64 "$BASE_REF@$base_digest"
           pull_status=$?
           set -e
-          test "$pull_status" -eq 0 || { echo "could not materialize the verified upstream base" >&2; exit 1; }
+          if [ "$pull_status" -ne 0 ]; then
+            cat -- "$pull_stderr" >&2
+            echo "could not materialize the verified upstream base" >&2
+            exit 1
+          fi
           test "$(wc -c <"$pull_stdout")" -le $((64 * 1024))
           test "$(wc -c <"$pull_stderr")" -le $((64 * 1024))
-          if [ -s "$pull_stderr" ]; then
-            cat -- "$pull_stderr" >&2
-            echo "upstream base materialization emitted unexpected diagnostics" >&2
+          if ! bash .github/check_bounded_diagnostics.sh "$pull_stderr" $((64 * 1024)); then
+            echo "upstream base materialization emitted warning or error diagnostics" >&2
             exit 1
           fi
           printf 'digest=%s\n' "$base_digest" >> "$GITHUB_OUTPUT"
@@ -327,8 +334,12 @@ jobs:
             set -e
             test "$(wc -c <"$stdout_file")" -le $((64 * 1024))
             test "$(wc -c <"$stderr_file")" -le $((64 * 1024))
-            if [ "$status" -ne 0 ] || [ -s "$stderr_file" ]; then
+            if [ "$status" -ne 0 ]; then
               cat -- "$stderr_file" >&2
+              rm -f -- "$stdout_file" "$stderr_file"
+              return 1
+            fi
+            if ! bash .github/check_bounded_diagnostics.sh "$stderr_file" $((64 * 1024)); then
               rm -f -- "$stdout_file" "$stderr_file"
               return 1
             fi
@@ -463,78 +474,94 @@ jobs:
       - id: registry
         name: Verify or resume the exact tested image
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.versions.outputs.image_tag }}
         run: |
           set -euo pipefail
           tested_image_id="$(docker image inspect "$IMAGE:$TAG" --format '{{.Id}}')"
           printf 'tested_image_id=%s\n' "$tested_image_id" >> "$GITHUB_OUTPUT"
-          inspection_file="$RUNNER_TEMP/registry-existing-manifest.json"
-          diagnostics_file="$RUNNER_TEMP/registry-existing-manifest.stderr"
+          package_versions_file="$RUNNER_TEMP/registry-existing-package-versions.json"
+          diagnostics_file="$RUNNER_TEMP/registry-existing-package-versions.stderr"
           set +e
           bash .github/run_bounded_command.sh \
-            $((1024 * 1024)) $((64 * 1024)) "$inspection_file" "$diagnostics_file" 90 \
-            docker manifest inspect --verbose "$IMAGE:$TAG"
-          inspection_status=$?
+            $((1024 * 1024)) $((64 * 1024)) "$package_versions_file" "$diagnostics_file" 90 \
+            gh api --hostname github.com \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              --paginate --slurp \
+              'orgs/TeleCrypt-io/packages/container/telecrypt-synapse/versions?per_page=100'
+          package_versions_status=$?
           set -e
-          test "$(wc -c <"$inspection_file")" -le $((1024 * 1024))
+          test "$(wc -c <"$package_versions_file")" -le $((1024 * 1024))
           test "$(wc -c <"$diagnostics_file")" -le $((64 * 1024))
-          inspection="$(cat -- "$inspection_file" "$diagnostics_file")"
-          if [ "$inspection_status" -eq 0 ]; then
-            if [ -s "$diagnostics_file" ]; then
-              cat -- "$diagnostics_file" >&2
-              echo "registry manifest inspection emitted unexpected diagnostics" >&2
-              exit 1
-            fi
-            registry_manifest_digest="$(jq -er '
-              if type == "array" then
-                if length == 1 then .[0].Descriptor.digest
-                else error("registry tag must expose exactly one image manifest") end
-              elif type == "object" then .Descriptor.digest
-              else error("registry tag manifest response has an invalid shape") end
-              | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))
-            ' "$inspection_file")"
-            result="$(bash .github/verify_registry_image.sh "$IMAGE:$TAG" "$tested_image_id" "$registry_manifest_digest")"
-            registry_digest="${result#digest=}"
-            if [[ ! "$registry_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              echo "existing registry image did not return a sha256 digest: $IMAGE:$TAG" >&2
-              exit 1
-            fi
-            printf 'existing=true\n' >> "$GITHUB_OUTPUT"
-            printf 'digest=%s\n' "$registry_digest" >> "$GITHUB_OUTPUT"
-            echo "resuming the exact already-pushed image: $IMAGE:$TAG"
-          elif printf '%s\n' "$inspection" | grep -Eqi 'manifest unknown|no such manifest'; then
-            printf 'existing=false\n' >> "$GITHUB_OUTPUT"
-            echo "immutable image is absent: $IMAGE:$TAG"
-          else
-            echo "cannot prove whether immutable image exists: $IMAGE:$TAG" >&2
+          if [ "$package_versions_status" -ne 0 ] || [ -s "$diagnostics_file" ]; then
+            cat -- "$diagnostics_file" >&2
+            echo "could not resolve the authenticated GitHub Packages tag state: $IMAGE:$TAG" >&2
             exit 1
           fi
+          classification="$(python3 .github/classify_registry_tag.py "$package_versions_file" "$TAG")"
+          case "$classification" in
+            absent)
+              printf 'existing=false\n' >> "$GITHUB_OUTPUT"
+              echo "immutable image is absent: $IMAGE:$TAG"
+              ;;
+            existing\ sha256:*)
+              registry_digest="${classification#existing }"
+              result="$(bash .github/verify_registry_image.sh "$IMAGE:$TAG" "$tested_image_id" "$registry_digest")"
+              registry_digest="${result#digest=}"
+              if [[ ! "$registry_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "existing registry image did not return a sha256 digest: $IMAGE:$TAG" >&2
+                exit 1
+              fi
+              printf 'existing=true\n' >> "$GITHUB_OUTPUT"
+              printf 'digest=%s\n' "$registry_digest" >> "$GITHUB_OUTPUT"
+              echo "resuming the exact already-pushed image: $IMAGE:$TAG"
+              ;;
+            *)
+              echo "GitHub Packages returned an invalid tag classification: $IMAGE:$TAG" >&2
+              exit 1
+              ;;
+          esac
       - name: Recheck registry tag absence immediately before push
         if: steps.registry.outputs.existing != 'true'
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.versions.outputs.image_tag }}
         run: |
           set -euo pipefail
-          inspection_file="$RUNNER_TEMP/registry-absence-manifest.json"
-          diagnostics_file="$RUNNER_TEMP/registry-absence-manifest.stderr"
+          package_versions_file="$RUNNER_TEMP/registry-absence-package-versions.json"
+          diagnostics_file="$RUNNER_TEMP/registry-absence-package-versions.stderr"
           set +e
           bash .github/run_bounded_command.sh \
-            $((64 * 1024)) $((64 * 1024)) "$inspection_file" "$diagnostics_file" 90 \
-            docker manifest inspect "$IMAGE:$TAG"
-          inspection_status=$?
+            $((1024 * 1024)) $((64 * 1024)) "$package_versions_file" "$diagnostics_file" 90 \
+            gh api --hostname github.com \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              --paginate --slurp \
+              'orgs/TeleCrypt-io/packages/container/telecrypt-synapse/versions?per_page=100'
+          package_versions_status=$?
           set -e
-          test "$(wc -c <"$inspection_file")" -le 65536
+          test "$(wc -c <"$package_versions_file")" -le $((1024 * 1024))
           test "$(wc -c <"$diagnostics_file")" -le 65536
-          inspection="$(cat -- "$inspection_file" "$diagnostics_file")"
-          if [ "$inspection_status" -eq 0 ]; then
-            echo "immutable image appeared after the archive test: $IMAGE:$TAG" >&2
-            exit 1
-          elif printf '%s\n' "$inspection" | grep -Eqi 'manifest unknown|no such manifest'; then
-            echo "immutable image remains absent immediately before push: $IMAGE:$TAG"
-          else
-            echo "cannot prove registry tag absence immediately before push: $IMAGE:$TAG" >&2
+          if [ "$package_versions_status" -ne 0 ] || [ -s "$diagnostics_file" ]; then
+            cat -- "$diagnostics_file" >&2
+            echo "could not resolve the authenticated GitHub Packages tag state immediately before push: $IMAGE:$TAG" >&2
             exit 1
           fi
+          classification="$(python3 .github/classify_registry_tag.py "$package_versions_file" "$TAG")"
+          case "$classification" in
+            absent)
+              echo "immutable image remains absent immediately before push: $IMAGE:$TAG"
+              ;;
+            existing\ sha256:*)
+              echo "immutable image appeared after the archive test: $IMAGE:$TAG" >&2
+              exit 1
+              ;;
+            *)
+              echo "GitHub Packages returned an invalid tag classification immediately before push: $IMAGE:$TAG" >&2
+              exit 1
+              ;;
+          esac
       - name: Recheck the exact source tag and refreshed main immediately before image push
         if: steps.registry.outputs.existing != 'true'
         env:
@@ -576,9 +603,8 @@ jobs:
             echo "docker push failed (status $push_status)" >&2
             exit 1
           fi
-          if [ -s "$push_stderr" ]; then
-            cat -- "$push_stdout" "$push_stderr" >&2
-            echo "docker push emitted unexpected diagnostics" >&2
+          if ! bash .github/check_bounded_diagnostics.sh "$push_stderr" $((64 * 1024)); then
+            echo "docker push emitted warning or error diagnostics" >&2
             exit 1
           fi
           cat -- "$push_stdout"
@@ -590,12 +616,15 @@ jobs:
             docker manifest inspect --verbose "$IMAGE:$TAG"
           manifest_status=$?
           set -e
-          test "$manifest_status" -eq 0
+          if [ "$manifest_status" -ne 0 ]; then
+            cat -- "$diagnostics_file" >&2
+            echo "could not inspect the pushed registry manifest" >&2
+            exit 1
+          fi
           test "$(wc -c <"$manifest_file")" -le $((1024 * 1024))
           test "$(wc -c <"$diagnostics_file")" -le $((64 * 1024))
-          if [ -s "$diagnostics_file" ]; then
-            cat -- "$diagnostics_file" >&2
-            echo "registry manifest inspection emitted unexpected diagnostics" >&2
+          if ! bash .github/check_bounded_diagnostics.sh "$diagnostics_file" $((64 * 1024)); then
+            echo "registry manifest inspection emitted warning or error diagnostics" >&2
             exit 1
           fi
           registry_manifest_digest="$(jq -er '

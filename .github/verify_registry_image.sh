@@ -53,6 +53,7 @@ capture_manifest() {
   rm -f -- "$path" "$stderr_path"
   if ! capture_command "$max_manifest_bytes" $((64 * 1024)) "$path" "$stderr_path" "$docker_timeout" \
     docker manifest inspect --verbose "$image_ref"; then
+    cat -- "$stderr_path" >&2
     echo "could not inspect the single registry manifest: $image_ref" >&2
     exit 1
   fi
@@ -64,9 +65,8 @@ capture_manifest() {
     echo "registry manifest diagnostics exceed 65536 bytes: $image_ref" >&2
     exit 1
   fi
-  if [ -s "$stderr_path" ]; then
-    cat -- "$stderr_path" >&2
-    echo "registry manifest inspection emitted unexpected diagnostics: $image_ref" >&2
+  if ! bash "$(dirname -- "${BASH_SOURCE[0]}")/check_bounded_diagnostics.sh" "$stderr_path" $((64 * 1024)); then
+    echo "registry manifest inspection emitted warning or error diagnostics: $image_ref" >&2
     exit 1
   fi
 }
@@ -111,13 +111,13 @@ bounded_inspect() {
   rm -f -- "$stdout_path" "$stderr_path"
   if ! capture_command $((64 * 1024)) $((64 * 1024)) "$stdout_path" "$stderr_path" 30s \
     docker image inspect "$image_ref" --format "$format"; then
+    cat -- "$stderr_path" >&2
     return 1
   fi
   if [ "$(wc -c <"$stdout_path")" -gt 65536 ] || [ "$(wc -c <"$stderr_path")" -gt 65536 ]; then
     return 1
   fi
-  if [ -s "$stderr_path" ]; then
-    cat -- "$stderr_path" >&2
+  if ! bash "$(dirname -- "${BASH_SOURCE[0]}")/check_bounded_diagnostics.sh" "$stderr_path" $((64 * 1024)); then
     return 1
   fi
   cat -- "$stdout_path"
@@ -141,6 +141,7 @@ fi
 
 if ! capture_command $((64 * 1024)) $((64 * 1024)) "$workdir/pull.log" "$workdir/pull.stderr" "$docker_timeout" \
   docker pull --platform linux/amd64 "$image_ref"; then
+  cat -- "$workdir/pull.stderr" >&2
   echo "could not pull the exact registry image: $image_ref" >&2
   exit 1
 fi
@@ -148,9 +149,8 @@ if [ "$(wc -c <"$workdir/pull.log")" -gt 65536 ] || [ "$(wc -c <"$workdir/pull.s
   echo "registry pull output exceeds 65536 bytes: $image_ref" >&2
   exit 1
 fi
-if [ -s "$workdir/pull.stderr" ]; then
-  cat -- "$workdir/pull.stderr" >&2
-  echo "registry pull emitted unexpected diagnostics: $image_ref" >&2
+if ! bash "$(dirname -- "${BASH_SOURCE[0]}")/check_bounded_diagnostics.sh" "$workdir/pull.stderr" $((64 * 1024)); then
+  echo "registry pull emitted warning or error diagnostics: $image_ref" >&2
   exit 1
 fi
 if ! pulled_image_id=$(bounded_inspect '{{.Id}}'); then

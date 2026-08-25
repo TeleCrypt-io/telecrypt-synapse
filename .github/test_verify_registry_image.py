@@ -41,6 +41,9 @@ def fake_docker(path: Path) -> None:
     path.write_text(
         """#!/bin/sh
 set -eu
+if [ -n "${FAKE_DOCKER_STDERR:-}" ]; then
+  cat "$FAKE_DOCKER_STDERR" >&2
+fi
 case "$1 ${2-}" in
   "manifest inspect")
     count=$(cat "$FAKE_DOCKER_COUNTER")
@@ -77,6 +80,7 @@ class VerifyRegistryImageTests(unittest.TestCase):
         *,
         platform: str = "linux/amd64",
         expected_digest: str = MANIFEST_DIGEST,
+        diagnostics: bytes | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -85,9 +89,11 @@ class VerifyRegistryImageTests(unittest.TestCase):
             first_path = root / "first.json"
             second_path = root / "second.json"
             counter_path = root / "counter"
+            diagnostics_path = root / "diagnostics"
             first_path.write_text(json.dumps(first), encoding="utf-8")
             second_path.write_text(json.dumps(second if second is not None else first), encoding="utf-8")
             counter_path.write_text("0", encoding="ascii")
+            diagnostics_path.write_bytes(diagnostics or b"")
             environment = {
                 **os.environ,
                 "PATH": f"{root}:{os.environ['PATH']}",
@@ -98,6 +104,7 @@ class VerifyRegistryImageTests(unittest.TestCase):
                 "FAKE_DOCKER_PLATFORM": platform,
                 "FAKE_DOCKER_IMAGE_NAME": IMAGE_NAME,
                 "FAKE_DOCKER_MANIFEST_DIGEST": expected_digest,
+                "FAKE_DOCKER_STDERR": str(diagnostics_path),
             }
             return subprocess.run(
                 ["bash", str(SCRIPT), IMAGE_REF, IMAGE_ID, expected_digest],
@@ -129,6 +136,16 @@ class VerifyRegistryImageTests(unittest.TestCase):
         result = self.run_verifier(manifest(MANIFEST_DIGEST), manifest(OTHER_MANIFEST_DIGEST))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("changed while it was being pulled", result.stderr)
+
+    def test_accepts_ordinary_docker_progress_on_stderr(self) -> None:
+        result = self.run_verifier(manifest(MANIFEST_DIGEST), diagnostics=b"#1 pulling layer\n#1 DONE\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("#1 DONE", result.stderr)
+
+    def test_rejects_warning_marker_on_successful_docker_command(self) -> None:
+        result = self.run_verifier(manifest(MANIFEST_DIGEST), diagnostics=b"WARNING: mutable tag\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("warning or error diagnostics", result.stderr)
 
 
 if __name__ == "__main__":

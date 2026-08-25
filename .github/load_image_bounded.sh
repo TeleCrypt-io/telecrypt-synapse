@@ -15,7 +15,8 @@ set +e
   docker load --input "$archive"
 status=$?
 set -e
-if [ "$status" -ne 0 ] || [ -s "$stderr_file" ]; then
+if [ "$status" -ne 0 ]; then
   cat -- "$stderr_file" >&2
   exit 1
 fi
+bash "$(dirname -- "${BASH_SOURCE[0]}")/check_bounded_diagnostics.sh" "$stderr_file" $((64 * 1024))
