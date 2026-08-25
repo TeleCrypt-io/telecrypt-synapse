@@ -163,6 +163,16 @@ class StrictGitFetchTests(unittest.TestCase):
         self.assertNotRegex(helper, r"ulimit\s+-f")
         self.assertIn("MAX_GIT_OUTPUT_BYTES", helper)
 
+    def test_git_boundary_retains_the_runner_system_ca_store(self) -> None:
+        helper = HELPER.read_text(encoding="utf-8")
+        self.assertIn("-c http.sslVerify=true", helper)
+        self.assertIn("GIT_SSL_CAINFO", helper)
+        self.assertIn("GIT_SSL_CAPATH", helper)
+        self.assertNotIn("-c http.sslCAInfo=", helper)
+        self.assertNotIn("-c http.sslCAPath=", helper)
+        self.assertNotIn("-c http.sslCert=", helper)
+        self.assertNotIn("-c http.sslKey=", helper)
+
 
 if __name__ == "__main__":
     unittest.main()
