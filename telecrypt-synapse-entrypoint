@@ -16,7 +16,8 @@ MEDIA_PATH = f"{STAGING_PATH}/media"
 MOUNTINFO_PATH = "/proc/self/mountinfo"
 EXPECTED_UID = 991
 EXPECTED_GID = 991
-EXPECTED_MODE = 0o700
+EXPECTED_STAGING_MODE = 0o711
+EXPECTED_CHILD_MODE = 0o700
 FREE_RESERVE_BYTES = 10 * 1024 * 1024 * 1024
 DISK_FILESYSTEMS = frozenset(
     {
@@ -121,14 +122,20 @@ def validate_mount(path: str = STAGING_PATH, mountinfo_path: str = MOUNTINFO_PAT
         fail("/staging is not writable")
 
 
-def _directory_metadata(path: str, label: str, *, create: bool = False) -> os.stat_result:
+def _directory_metadata(
+    path: str,
+    label: str,
+    *,
+    expected_mode: int = EXPECTED_CHILD_MODE,
+    create: bool = False,
+) -> os.stat_result:
     try:
         metadata = os.lstat(path)
     except FileNotFoundError:
         if not create:
             fail(f"{label} is missing")
         try:
-            os.mkdir(path, EXPECTED_MODE)
+            os.mkdir(path, expected_mode)
             metadata = os.lstat(path)
         except OSError:
             fail(f"{label} cannot be created")
@@ -140,7 +147,7 @@ def _directory_metadata(path: str, label: str, *, create: bool = False) -> os.st
     if (
         metadata.st_uid != EXPECTED_UID
         or metadata.st_gid != EXPECTED_GID
-        or stat.S_IMODE(metadata.st_mode) != EXPECTED_MODE
+        or stat.S_IMODE(metadata.st_mode) != expected_mode
     ):
         fail(f"{label} ownership or mode is unsafe")
     if not os.access(path, os.W_OK | os.X_OK):
@@ -153,8 +160,10 @@ def _validate_runtime_identity() -> None:
         fail("entrypoint must run as uid/gid 991")
 
 
-def _open_directory(path: str, label: str) -> int:
-    _directory_metadata(path, label)
+def _open_directory(
+    path: str, label: str, *, expected_mode: int = EXPECTED_CHILD_MODE
+) -> int:
+    _directory_metadata(path, label, expected_mode=expected_mode)
     try:
         fd = os.open(
             path,
@@ -168,7 +177,7 @@ def _open_directory(path: str, label: str) -> int:
         or not stat.S_ISDIR(metadata.st_mode)
         or metadata.st_uid != EXPECTED_UID
         or metadata.st_gid != EXPECTED_GID
-        or stat.S_IMODE(metadata.st_mode) != EXPECTED_MODE
+        or stat.S_IMODE(metadata.st_mode) != expected_mode
     ):
         os.close(fd)
         fail(f"{label} changed while being opened")
@@ -269,7 +278,9 @@ def prepare_staging(
 ) -> None:
     _validate_runtime_identity()
     validate_mount(staging, mountinfo_path)
-    root_metadata = _directory_metadata(staging, "staging mount")
+    root_metadata = _directory_metadata(
+        staging, "staging mount", expected_mode=EXPECTED_STAGING_MODE
+    )
     paths = (f"{staging}/tmp", f"{staging}/media")
     for path in paths:
         child_metadata = _directory_metadata(path, "staging child", create=True)

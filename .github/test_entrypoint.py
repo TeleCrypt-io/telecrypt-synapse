@@ -36,7 +36,6 @@ class EntrypointTests(unittest.TestCase):
         return mountinfo
 
     def prepare(self, path: pathlib.Path, *, reserve: int = 1) -> None:
-        path.chmod(0o700)
         mountinfo = self.mountinfo(path)
         uid = path.stat().st_uid
         gid = path.stat().st_gid
@@ -56,6 +55,8 @@ class EntrypointTests(unittest.TestCase):
             'STAGING_PATH = "/staging"',
             'TMP_PATH = f"{STAGING_PATH}/tmp"',
             'MEDIA_PATH = f"{STAGING_PATH}/media"',
+            "EXPECTED_STAGING_MODE = 0o711",
+            "EXPECTED_CHILD_MODE = 0o700",
             "FREE_RESERVE_BYTES = 10 * 1024 * 1024 * 1024",
         ):
             self.assertIn(value, source)
@@ -88,7 +89,7 @@ class EntrypointTests(unittest.TestCase):
     def test_prepare_clears_only_tmp_and_media_children_and_sets_tmpdir(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             staging = pathlib.Path(directory) / "staging"
-            staging.mkdir(mode=0o700)
+            staging.mkdir(mode=0o711)
             (staging / "keep").mkdir(mode=0o700)
             (staging / "keep" / "sentinel").write_text("retain", encoding="ascii")
             for child in ("tmp", "media"):
@@ -109,10 +110,41 @@ class EntrypointTests(unittest.TestCase):
                 else:
                     os.environ["TMPDIR"] = original_tmpdir
 
+    def test_prepare_requires_exact_distinct_root_and_child_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            staging = pathlib.Path(directory) / "staging"
+            staging.mkdir(mode=0o711)
+            (staging / "tmp").mkdir(mode=0o700)
+            (staging / "media").mkdir(mode=0o700)
+
+            original_tmpdir = os.environ.get("TMPDIR")
+            try:
+                self.prepare(staging)
+                self.assertEqual(stat.S_IMODE(staging.stat().st_mode), 0o711)
+                for child in ("tmp", "media"):
+                    self.assertEqual(stat.S_IMODE((staging / child).stat().st_mode), 0o700)
+
+                for path, mode in (
+                    (staging, 0o700),
+                    (staging, 0o755),
+                    (staging / "tmp", 0o711),
+                    (staging / "media", 0o755),
+                ):
+                    with self.subTest(path=path.name, mode=oct(mode)):
+                        path.chmod(mode)
+                        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                            self.prepare(staging)
+                        path.chmod(0o711 if path == staging else 0o700)
+            finally:
+                if original_tmpdir is None:
+                    os.environ.pop("TMPDIR", None)
+                else:
+                    os.environ["TMPDIR"] = original_tmpdir
+
     def test_prepare_rejects_symlinked_staging_content(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             staging = pathlib.Path(directory) / "staging"
-            staging.mkdir(mode=0o700)
+            staging.mkdir(mode=0o711)
             outside = pathlib.Path(directory) / "outside"
             outside.write_text("retain", encoding="ascii")
             (staging / "tmp").symlink_to(outside)

@@ -105,12 +105,12 @@ The provider is configured by Synapse's `media_storage_providers` setting; this 
 S3 endpoint, bucket, or credentials. Those remain server-only secrets.
 
 The image has one fixed `/telecrypt-synapse-entrypoint`. It runs as UID/GID 991, requires the
-Compose-provided `/staging` bind mount to be one writable disk-backed filesystem with the exact
-reviewed ownership and mode, creates and checks `/staging/tmp` and `/staging/media`, and refuses to
-start unless at least 10 GiB (10,737,418,240 bytes) is available. Before Synapse starts it removes
-only children beneath those two disposable directories, sets `TMPDIR=/staging/tmp`, and executes the
-single Synapse homeserver process. It never follows symlinks, crosses nested mounts, or clears the
-mount root.
+Compose-provided `/staging` bind mount to be one writable disk-backed filesystem owned by UID/GID
+991 with exact mode 0711, creates and checks `/staging/tmp` and `/staging/media` with exact mode 0700,
+and refuses to start unless at least 10 GiB (10,737,418,240 bytes) is available. Before Synapse
+starts it removes only children beneath those two disposable directories, sets `TMPDIR=/staging/tmp`,
+and executes the single Synapse homeserver process. It never follows symlinks, crosses nested mounts,
+or clears the mount root.
 
 ## Release and deployment boundary
 
