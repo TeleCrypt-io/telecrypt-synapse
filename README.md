@@ -90,7 +90,7 @@ runtime.
 - Base: `ghcr.io/element-hq/synapse:v<version>`, with the upstream commit recorded in `provenance.lock`.
 - Media provider: the TeleCrypt fork of [`matrix-org/synapse-s3-storage-provider`](https://github.com/TeleCrypt-io/synapse-s3-storage-provider), preserving its Apache-2.0 license and pinned by immutable fork release, commit, and source-archive hash in `provenance.lock`.
 - Policy: [`TeleCrypt-io/controlplane`](https://github.com/TeleCrypt-io/controlplane), installed as a
-  `telecrypt_tier_controller` wheel from the exact public GitHub Release 0.5.9. Its exact SHA-256
+  `telecrypt_tier_controller` wheel from the exact public GitHub Release 0.5.10. Its exact SHA-256
   digest is recorded in `versions.env` and verified before the offline image build.
 
 The upstream Synapse base remains an exact release version rather than a digest-pinned setting. Each
