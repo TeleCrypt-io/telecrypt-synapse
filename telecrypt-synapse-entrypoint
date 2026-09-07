@@ -286,9 +286,9 @@ def prepare_staging(
         child_metadata = _directory_metadata(path, "staging child", create=True)
         if child_metadata.st_dev != root_metadata.st_dev:
             fail("staging child is not on the fixed staging mount")
-    _free_bytes(staging)
     for path in paths:
         clear_children(path)
+    _free_bytes(staging)
     for path in paths:
         _directory_metadata(path, "staging child")
         _probe_write(path)
