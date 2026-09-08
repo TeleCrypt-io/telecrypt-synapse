@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr
 import hashlib
+from http.client import IncompleteRead
 import io
 import json
 import os
@@ -170,6 +171,72 @@ class PrepareInputsTests(unittest.TestCase):
             [prepare_inputs.GITHUB_API_ACCEPT, prepare_inputs.BINARY_ACCEPT],
         )
 
+    def test_download_retains_failed_temporary_input(self) -> None:
+        payload = b"input that failed verification"
+
+        class Response:
+            def __init__(self) -> None:
+                self.remaining = [payload, b""]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *unused: object) -> None:
+                return None
+
+            def read(self, unused_size: int) -> bytes:
+                return self.remaining.pop(0)
+
+        with tempfile.TemporaryDirectory(delete=False, prefix="prepare-inputs-download-") as directory:
+            root = Path(directory)
+            with mock.patch.object(
+                prepare_inputs.URL_OPENER, "open", return_value=Response()
+            ), self.assertRaises(SystemExit) as failure:
+                prepare_inputs.download(
+                    "https://github.com/TeleCrypt-io/synapse/archive.tar.gz",
+                    root / "archive.tar.gz",
+                    "0" * 64,
+                )
+
+            message = str(failure.exception)
+            marker = "retained temporary input: "
+            self.assertIn(marker, message)
+            retained = Path(message.split(marker, 1)[1])
+            self.assertTrue(retained.exists())
+            self.assertEqual(retained.read_bytes(), payload)
+
+    def test_github_api_http_error_retains_read_and_close_failures(self) -> None:
+        class FailingBody:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def read(self) -> bytes:
+                raise IncompleteRead(b"partial response body", 99)
+
+            def close(self) -> None:
+                self.closed = True
+                raise OSError("fixture response close failed")
+
+        body = FailingBody()
+        error = HTTPError(
+            "https://api.github.com/repos/TeleCrypt-io/controlplane/releases/tags/0.4.0",
+            503,
+            "service unavailable",
+            hdrs=None,
+            fp=body,
+        )
+        with mock.patch.object(prepare_inputs.URL_OPENER, "open", side_effect=error):
+            with self.assertRaises(SystemExit) as failure:
+                prepare_inputs.fetch_github_api(
+                    "TeleCrypt-io/controlplane", "releases/tags/0.4.0", "Controlplane"
+                )
+        self.assertTrue(body.closed)
+        message = str(failure.exception)
+        self.assertIn("503", message)
+        self.assertIn("partial response body", message)
+        self.assertIn("response read failed: IncompleteRead", message)
+        self.assertIn("response close failed: fixture response close failed", message)
+
     def test_pip_accepts_silent_success(self) -> None:
         prepare_inputs.run_pip([sys.executable, "-c", "pass"])
 
@@ -193,18 +260,29 @@ class PrepareInputsTests(unittest.TestCase):
         self.assertIn("normal output", diagnostics.getvalue())
 
     def test_github_api_preserves_http_error_body(self) -> None:
+        class TrackingBody(io.BytesIO):
+            def __init__(self, value: bytes) -> None:
+                super().__init__(value)
+                self.closed_by_fetch = False
+
+            def close(self) -> None:
+                self.closed_by_fetch = True
+                super().close()
+
+        response_body = TrackingBody(b"github API failure body")
         error = HTTPError(
             "https://api.github.com/repos/TeleCrypt-io/controlplane/releases/tags/0.4.0",
             503,
             "service unavailable",
             hdrs=None,
-            fp=io.BytesIO(b"github API failure body"),
+            fp=response_body,
         )
         with mock.patch.object(prepare_inputs.URL_OPENER, "open", side_effect=error):
             with self.assertRaises(SystemExit) as failure:
                 prepare_inputs.fetch_github_api(
                     "TeleCrypt-io/controlplane", "releases/tags/0.4.0", "Controlplane"
                 )
+        self.assertTrue(response_body.closed_by_fetch)
         self.assertIn("github API failure body", str(failure.exception))
 
     def test_github_api_preserves_malformed_body(self) -> None:

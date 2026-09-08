@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import hashlib
+from http.client import IncompleteRead
 import json
 import posixpath
 import re
@@ -170,18 +171,14 @@ def download(
                     digest.update(chunk)
                     output.write(chunk)
         if expected_size is not None and total_bytes != expected_size:
-            fail(f"{destination.name} has size {total_bytes}, expected {expected_size}")
+            raise ValueError(f"{destination.name} has size {total_bytes}, expected {expected_size}")
         actual = digest.hexdigest()
         if actual != expected:
-            fail(f"{destination.name} has digest {actual}, expected {expected}")
+            raise ValueError(f"{destination.name} has digest {actual}, expected {expected}")
         temporary.replace(destination)
     except Exception as exc:
-        if isinstance(exc, SystemExit):
-            raise
-        fail(f"could not download or verify {destination.name}: {exc}")
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+        retained = f"; retained temporary input: {temporary}" if temporary is not None else ""
+        fail(f"could not download or verify {destination.name}: {exc}{retained}")
 
 
 def read_response(response) -> bytes:
@@ -207,11 +204,31 @@ def fetch_github_api(repository: str, endpoint: str, label: str) -> dict:
     except SystemExit:
         raise
     except HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        fail(
+        body_bytes = b""
+        read_error: Exception | None = None
+        close_error: Exception | None = None
+        try:
+            body_bytes = exc.read()
+        except IncompleteRead as error:
+            body_bytes = error.partial
+            read_error = error
+        except Exception as error:
+            read_error = error
+        finally:
+            try:
+                exc.close()
+            except Exception as error:
+                close_error = error
+        body = body_bytes.decode("utf-8", errors="replace")
+        details = (
             f"could not fetch {label} API metadata: {type(exc).__name__}: {exc}"
             f"\nresponse body:\n{body}"
         )
+        if read_error is not None:
+            details += f"\nresponse read failed: {read_error}"
+        if close_error is not None:
+            details += f"\nresponse close failed: {close_error}"
+        fail(details)
     except Exception as exc:
         fail(f"could not fetch {label} API metadata: {type(exc).__name__}: {exc}")
     try:
