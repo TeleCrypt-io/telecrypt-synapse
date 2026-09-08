@@ -16,7 +16,6 @@ ARG S3_PROVIDER_VERSION
 ARG S3_PROVIDER_FORK_RELEASE
 ARG S3_PROVIDER_FORK_COMMIT
 ARG S3_PROVIDER_FORK_ARCHIVE_SHA256
-ARG S3_PROVIDER_ARCHIVE_SHA256
 ARG CONTROLPLANE_RELEASE
 ARG CONTROLPLANE_WHEEL_SHA256
 USER root
@@ -41,10 +40,6 @@ RUN --mount=type=bind,source=s3-provider.lock,target=/tmp/s3-provider.lock,reado
     test -n "${S3_PROVIDER_FORK_ARCHIVE_SHA256}" || { echo "S3_PROVIDER_FORK_ARCHIVE_SHA256 is required" >&2; exit 2; }; \
     test "${#S3_PROVIDER_FORK_ARCHIVE_SHA256}" -eq 64 || { echo "S3_PROVIDER_FORK_ARCHIVE_SHA256 must be 64 hex characters" >&2; exit 2; }; \
     case "${S3_PROVIDER_FORK_ARCHIVE_SHA256}" in *[!0123456789abcdef]*) echo "S3_PROVIDER_FORK_ARCHIVE_SHA256 must be lowercase hexadecimal" >&2; exit 2 ;; esac; \
-    test -n "${S3_PROVIDER_ARCHIVE_SHA256}" || { echo "S3_PROVIDER_ARCHIVE_SHA256 is required" >&2; exit 2; }; \
-    test "${#S3_PROVIDER_ARCHIVE_SHA256}" -eq 64 || { echo "S3_PROVIDER_ARCHIVE_SHA256 must be 64 hex characters" >&2; exit 2; }; \
-    case "${S3_PROVIDER_ARCHIVE_SHA256}" in *[!0123456789abcdef]*) echo "S3_PROVIDER_ARCHIVE_SHA256 must be lowercase hexadecimal" >&2; exit 2 ;; esac; \
-    test "${S3_PROVIDER_ARCHIVE_SHA256}" = "${S3_PROVIDER_FORK_ARCHIVE_SHA256}" || { echo "provider archive hashes disagree" >&2; exit 2; }; \
     test -n "${CONTROLPLANE_RELEASE}" || { echo "CONTROLPLANE_RELEASE is required" >&2; exit 2; }; \
     test -n "${CONTROLPLANE_WHEEL_SHA256}" || { echo "CONTROLPLANE_WHEEL_SHA256 is required" >&2; exit 2; }; \
     test "${#CONTROLPLANE_WHEEL_SHA256}" -eq 64 || { echo "CONTROLPLANE_WHEEL_SHA256 must be 64 hex characters" >&2; exit 2; }; \

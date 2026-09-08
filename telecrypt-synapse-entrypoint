@@ -65,6 +65,47 @@ def fail(message: str) -> NoReturn:
     raise SystemExit(78)
 
 
+def _close_fd(fd: int, label: str, failures: list[tuple[str, BaseException]]) -> bool:
+    try:
+        os.close(fd)
+        return True
+    except BaseException as error:
+        failures.append((label, error))
+        return False
+
+
+def _finish_operation(
+    primary: BaseException | None, failures: list[tuple[str, BaseException]]
+) -> None:
+    if failures:
+        details = "; ".join(
+            f"{label}: {type(error).__name__}: {error}" for label, error in failures
+        )
+        if primary is None:
+            fail(f"descriptor cleanup failed: {details}")
+        print(
+            f"telecrypt-synapse-entrypoint: descriptor cleanup also failed: {details}",
+            file=sys.stderr,
+        )
+    if primary is not None:
+        raise primary
+
+
+def _report_additional_failures(
+    label: str, failures: list[tuple[str, BaseException]]
+) -> None:
+    if not failures:
+        return
+    details = "; ".join(
+        f"{failure_label}: {type(error).__name__}: {error}"
+        for failure_label, error in failures
+    )
+    print(
+        f"telecrypt-synapse-entrypoint: {label} also failed: {details}",
+        file=sys.stderr,
+    )
+
+
 def _unescape_mountinfo(value: str) -> str:
     return value.replace(r"\040", " ").replace(r"\011", "\t").replace(
         r"\012", "\n"
@@ -171,16 +212,20 @@ def _open_directory(
         )
     except OSError:
         fail(f"{label} cannot be opened safely")
-    metadata = os.fstat(fd)
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISDIR(metadata.st_mode)
-        or metadata.st_uid != EXPECTED_UID
-        or metadata.st_gid != EXPECTED_GID
-        or stat.S_IMODE(metadata.st_mode) != expected_mode
-    ):
-        os.close(fd)
-        fail(f"{label} changed while being opened")
+    try:
+        metadata = os.fstat(fd)
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != EXPECTED_UID
+            or metadata.st_gid != EXPECTED_GID
+            or stat.S_IMODE(metadata.st_mode) != expected_mode
+        ):
+            fail(f"{label} changed while being opened")
+    except BaseException as error:
+        failures: list[tuple[str, BaseException]] = []
+        _close_fd(fd, f"{label} descriptor", failures)
+        _finish_operation(error, failures)
     return fd
 
 
@@ -202,6 +247,8 @@ def _remove_entry(parent_fd: int, name: str, device: int) -> None:
             )
         except OSError:
             fail("staging directory cannot be opened safely")
+        primary: BaseException | None = None
+        child_failures: list[tuple[str, BaseException]] = []
         try:
             child_metadata = os.fstat(child_fd)
             if child_metadata.st_dev != device:
@@ -211,9 +258,18 @@ def _remove_entry(parent_fd: int, name: str, device: int) -> None:
             except OSError:
                 fail("staging directory cannot be listed safely")
             for child in children:
-                _remove_entry(child_fd, child, device)
-        finally:
-            os.close(child_fd)
+                try:
+                    _remove_entry(child_fd, child, device)
+                except BaseException as error:
+                    child_failures.append((f"staging entry {child}", error))
+        except BaseException as error:
+            primary = error
+        if primary is None and child_failures:
+            primary = child_failures[0][1]
+            _report_additional_failures("staging child removal", child_failures[1:])
+        failures: list[tuple[str, BaseException]] = []
+        _close_fd(child_fd, "staging directory descriptor", failures)
+        _finish_operation(primary, failures)
         try:
             os.rmdir(name, dir_fd=parent_fd)
         except OSError:
@@ -227,6 +283,8 @@ def _remove_entry(parent_fd: int, name: str, device: int) -> None:
 
 def clear_children(path: str) -> None:
     fd = _open_directory(path, "staging child")
+    primary: BaseException | None = None
+    child_failures: list[tuple[str, BaseException]] = []
     try:
         device = os.fstat(fd).st_dev
         try:
@@ -234,14 +292,27 @@ def clear_children(path: str) -> None:
         except OSError:
             fail("staging directory cannot be listed safely")
         for child in children:
-            _remove_entry(fd, child, device)
-    finally:
-        os.close(fd)
+            try:
+                _remove_entry(fd, child, device)
+            except BaseException as error:
+                child_failures.append((f"staging entry {child}", error))
+    except BaseException as error:
+        primary = error
+    if primary is None and child_failures:
+        primary = child_failures[0][1]
+        _report_additional_failures("staging child removal", child_failures[1:])
+    failures: list[tuple[str, BaseException]] = []
+    _close_fd(fd, "staging child descriptor", failures)
+    _finish_operation(primary, failures)
 
 
 def _probe_write(path: str) -> None:
     fd = _open_directory(path, "staging child")
     name = f".telecrypt-entrypoint-{os.getpid()}"
+    probe_fd: int | None = None
+    probe_close_attempted = False
+    primary: BaseException | None = None
+    failures: list[tuple[str, BaseException]] = []
     try:
         try:
             probe_fd = os.open(
@@ -252,14 +323,20 @@ def _probe_write(path: str) -> None:
             )
         except OSError:
             fail("staging child is not writable")
-        else:
-            os.close(probe_fd)
+        assert probe_fd is not None
+        probe_close_attempted = True
+        if _close_fd(probe_fd, "staging write probe descriptor", failures):
+            probe_fd = None
         try:
             os.unlink(name, dir_fd=fd)
         except OSError:
             fail("staging write probe cannot be removed")
-    finally:
-        os.close(fd)
+    except BaseException as error:
+        primary = error
+    if probe_fd is not None and not probe_close_attempted:
+        _close_fd(probe_fd, "staging write probe descriptor", failures)
+    _close_fd(fd, "staging child descriptor", failures)
+    _finish_operation(primary, failures)
 
 
 def _free_bytes(path: str) -> int:

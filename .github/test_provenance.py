@@ -64,15 +64,12 @@ class ProvenanceTests(unittest.TestCase):
                 with self.subTest(mutation=mutation), self.assertRaises(SystemExit):
                     validate_provenance.load_lock(path)
 
-    def test_rejects_version_or_archive_hash_drift(self) -> None:
+    def test_rejects_version_drift(self) -> None:
         values = validate_provenance.load_lock(ROOT / "provenance.lock")
         with tempfile.TemporaryDirectory() as directory:
             versions = Path(directory) / "versions.env"
             original = (ROOT / "versions.env").read_text(encoding="ascii")
             versions.write_text(original.replace("SYNAPSE_VERSION=1.159.0", "SYNAPSE_VERSION=1.158.0"), encoding="ascii")
-            with self.assertRaises(SystemExit):
-                validate_provenance.validate_against_versions(values, versions)
-            versions.write_text(original.replace("S3_PROVIDER_ARCHIVE_SHA256=", "S3_PROVIDER_ARCHIVE_SHA256=" + "a" * 64 + " #"), encoding="ascii")
             with self.assertRaises(SystemExit):
                 validate_provenance.validate_against_versions(values, versions)
 
@@ -146,7 +143,7 @@ class ProvenanceTests(unittest.TestCase):
         self.assertIn("SYNAPSE_BASE_DIGEST=${{ steps.base.outputs.digest }}", workflow)
         self.assertIn("image contract mismatch (%s)", workflow)
         self.assertIn("((image_contract_failures == 0))", workflow)
-        self.assertNotIn('test "$(bounded_docker_inspect', workflow)
+        self.assertNotIn('test "$(docker_inspect', workflow)
         self.assertNotIn(".Config.Cmd", workflow)
         self.assertIn('synapse-s3-storage-provider-${S3_PROVIDER_FORK_RELEASE}.tar.gz', dockerfile)
         self.assertIn("--strip-components=1", dockerfile)

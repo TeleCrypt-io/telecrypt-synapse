@@ -8,14 +8,76 @@ readonly GIT=/usr/bin/git
 readonly REPOSITORY='TeleCrypt-io/telecrypt-synapse'
 readonly REMOTE='https://github.com/TeleCrypt-io/telecrypt-synapse.git'
 readonly REMOTE_WITHOUT_SUFFIX='https://github.com/TeleCrypt-io/telecrypt-synapse'
-readonly MAX_GIT_OUTPUT_BYTES=$((64 * 1024))
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/telecrypt-git.XXXXXX")"
 readonly TEMP_ROOT
-cleanup() { rm -rf -- "$TEMP_ROOT"; }
-trap cleanup EXIT
-trap 'cleanup; exit 143' HUP INT TERM
+cleanup() {
+  local cleanup_status=0
+  if ! rm -rf -- "$TEMP_ROOT"; then
+    echo 'ERROR: could not remove Git transport diagnostics' >&2
+    cleanup_status=1
+  fi
+  return "$cleanup_status"
+}
+on_exit() {
+  local status=$? cleanup_status
+  set +e
+  cleanup
+  cleanup_status=$?
+  if [[ "$status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
+    return "$cleanup_status"
+  fi
+  return "$status"
+}
+trap on_exit EXIT
+active_command_pid=''
+on_signal() {
+  local signal_name="$1" exit_status=143 probe_status=0 kill_status=0 wait_status=0 replay_status=0 cleanup_status=0
+  case "$signal_name" in
+    HUP) exit_status=129 ;;
+    INT) exit_status=130 ;;
+  esac
+  set +e
+  trap - EXIT HUP INT TERM
+  if [[ -n "$active_command_pid" ]]; then
+    kill -0 "$active_command_pid" 2>/dev/null
+    probe_status=$?
+    if [[ "$probe_status" -eq 0 ]]; then
+      kill -"$signal_name" "$active_command_pid"
+      kill_status=$?
+      if [[ "$kill_status" -ne 0 ]]; then
+        printf 'ERROR: Git transport child termination failed during %s (status %s)\n' "$signal_name" "$kill_status" >&2
+      fi
+    elif [[ "$probe_status" -ne 1 ]]; then
+      printf 'ERROR: Git transport child liveness check failed during %s (status %s)\n' "$signal_name" "$probe_status" >&2
+    fi
+    wait "$active_command_pid"
+    wait_status=$?
+    if [[ "$wait_status" -ne 0 && "$wait_status" -ne "$exit_status" ]]; then
+      printf 'ERROR: Git transport child wait failed during %s (status %s)\n' "$signal_name" "$wait_status" >&2
+    fi
+    active_command_pid=''
+  fi
+  if [[ -d "$TEMP_ROOT" ]]; then
+    while IFS= read -r -d '' path; do
+      cat -- "$path" >&2
+      if [[ "$?" -ne 0 ]]; then
+        echo "ERROR: could not replay Git transport diagnostics: $path" >&2
+        replay_status=1
+      fi
+    done < <(find "$TEMP_ROOT" -type f -print0)
+  fi
+  cleanup_status=0
+  cleanup || cleanup_status=$?
+  if [[ "$probe_status" -gt 1 || "$kill_status" -ne 0 || "$wait_status" -ne 0 && "$wait_status" -ne "$exit_status" || "$replay_status" -ne 0 || "$cleanup_status" -ne 0 ]]; then
+    exit_status=1
+  fi
+  exit "$exit_status"
+}
+trap 'on_signal HUP' HUP
+trap 'on_signal INT' INT
+trap 'on_signal TERM' TERM
 
 die() { printf 'git transport refused: %s\n' "$1" >&2; exit 64; }
 
@@ -66,11 +128,12 @@ git_safe() {
   stdout_file="$(mktemp "$TEMP_ROOT/stdout.XXXXXX")"
   stderr_file="$(mktemp "$TEMP_ROOT/stderr.XXXXXX")"
   set +e
-  /usr/bin/python3 "$SCRIPT_DIR/bounded-command.py" \
-    --stdout-limit "$MAX_GIT_OUTPUT_BYTES" --stderr-limit "$MAX_GIT_OUTPUT_BYTES" \
-    --stdout-path "$stdout_file" --stderr-path "$stderr_file" --timeout 30 -- \
-    "$GIT" "${GIT_OPTIONS[@]}" "$@"
+  timeout --signal=TERM --kill-after=5s 30s \
+    "$GIT" "${GIT_OPTIONS[@]}" "$@" >"$stdout_file" 2>"$stderr_file" &
+  active_command_pid=$!
+  wait "$active_command_pid"
   status=$?
+  active_command_pid=''
   set -e
   cat -- "$stdout_file"
   cat -- "$stderr_file" >&2
@@ -172,7 +235,7 @@ case "${1:-}" in
     [[ $# -ge 1 ]] || die 'fetch requires a fixed refspec'
     reject_local_transport_config
     for refspec; do validate_refspec "$refspec"; done
-    git_safe fetch --quiet --force --no-tags "$REMOTE" "$@"
+    git_safe fetch --force --no-tags "$REMOTE" "$@"
     ;;
   ls-remote)
     shift
@@ -183,12 +246,12 @@ case "${1:-}" in
       [[ "$ref" =~ ^refs/tags/([A-Za-z0-9._/-]+)$ ]] || die 'Git remote reference is malformed'
       validate_tag "${BASH_REMATCH[1]}"
     done
-    git_safe ls-remote --quiet --exit-code "$REMOTE" "$@"
+    git_safe ls-remote --exit-code "$REMOTE" "$@"
     ;;
   refs/*)
     reject_local_transport_config
     for refspec; do validate_refspec "$refspec"; done
-    git_safe fetch --quiet --force --no-tags "$REMOTE" "$@"
+    git_safe fetch --force --no-tags "$REMOTE" "$@"
     ;;
   *) die 'unsupported operation' ;;
 esac

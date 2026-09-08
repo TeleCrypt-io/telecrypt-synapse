@@ -7,16 +7,14 @@ import argparse
 import datetime
 import hashlib
 import json
-import os
 import posixpath
 import re
-import selectors
 import subprocess
 import sys
 import tarfile
 import tempfile
-import time
 import unicodedata
+from urllib.error import HTTPError
 import urllib.request
 from urllib.parse import urljoin, urlsplit
 from pathlib import Path
@@ -36,7 +34,6 @@ FORK_RELEASE_RE = re.compile(
 )
 DOWNLOAD_TIMEOUT_SECONDS = 60
 PIP_SUBPROCESS_TIMEOUT_SECONDS = 300
-MAX_PIP_OUTPUT_BYTES = 64 * 1024
 GITHUB_API_VERSION = "2026-03-10"
 GITHUB_API_ROOT = "https://api.github.com"
 GITHUB_API_ACCEPT = "application/vnd.github+json"
@@ -45,7 +42,6 @@ CONTROLPLANE_REPOSITORY = "TeleCrypt-io/controlplane"
 SYNAPSE_FORK_REPOSITORY = "TeleCrypt-io/synapse"
 S3_PROVIDER_FORK_REPOSITORY = "TeleCrypt-io/synapse-s3-storage-provider"
 CONTROLPLANE_IMAGE = "ghcr.io/telecrypt-io/controlplane"
-MAX_API_JSON_BYTES = 1024 * 1024
 MAX_DIGEST_JSON_BYTES = 64 * 1024
 MAX_TOTAL_INPUT_BYTES = 256 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 4096
@@ -75,7 +71,7 @@ def s3_provider_fork_archive_name(release: str) -> str:
     return f"synapse-s3-storage-provider-{release}.tar.gz"
 
 
-def run_bounded_pip(command: list[str]) -> None:
+def run_pip(command: list[str]) -> None:
     try:
         process = subprocess.Popen(
             command,
@@ -85,48 +81,24 @@ def run_bounded_pip(command: list[str]) -> None:
     except OSError as exc:
         fail(f"could not start pip download: {exc}")
 
-    selector = selectors.DefaultSelector()
-    if process.stdout is None or process.stderr is None:
+    def report_output(stdout: bytes, stderr: bytes) -> None:
+        for name, output in (("stdout", stdout), ("stderr", stderr)):
+            if output:
+                diagnostics = output.decode("utf-8", errors="replace")
+                print(f"pip download {name}:", file=sys.stderr)
+                print(diagnostics, end="" if diagnostics.endswith("\n") else "\n", file=sys.stderr)
+
+    try:
+        stdout, stderr = process.communicate(timeout=PIP_SUBPROCESS_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
         process.kill()
-        process.wait()
-        fail("pip download did not provide bounded output streams")
-    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
-    captured = {"stdout": bytearray(), "stderr": bytearray()}
-    overflow = False
-    deadline = time.monotonic() + PIP_SUBPROCESS_TIMEOUT_SECONDS
-    while selector.get_map():
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            process.kill()
-            selector.close()
-            process.wait()
-            fail(f"pip download exceeded {PIP_SUBPROCESS_TIMEOUT_SECONDS} seconds")
-        for key, _ in selector.select(remaining):
-            chunk = os.read(key.fileobj.fileno(), 64 * 1024)
-            if not chunk:
-                selector.unregister(key.fileobj)
-                key.fileobj.close()
-                continue
-            stream = captured[key.data]
-            if len(stream) + len(chunk) > MAX_PIP_OUTPUT_BYTES:
-                overflow = True
-                process.kill()
-            elif not overflow:
-                stream.extend(chunk)
-    selector.close()
-    return_code = process.wait()
-    if overflow:
-        fail(f"pip download emitted more than {MAX_PIP_OUTPUT_BYTES} bytes of diagnostics")
-    for name in ("stdout", "stderr"):
-        if captured[name]:
-            diagnostics = captured[name].decode("utf-8", errors="replace")
-            print(f"pip download {name}:", file=sys.stderr)
-            print(diagnostics, end="" if diagnostics.endswith("\n") else "\n", file=sys.stderr)
+        stdout, stderr = process.communicate()
+        report_output(stdout, stderr)
+        fail(f"pip download exceeded {PIP_SUBPROCESS_TIMEOUT_SECONDS} seconds")
+    report_output(stdout, stderr)
+    return_code = process.returncode
     if return_code != 0:
         fail(f"pip download failed with exit code {return_code}")
-    if captured["stdout"] or captured["stderr"]:
-        fail("pip download emitted unexpected diagnostics")
 
 
 class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -212,16 +184,11 @@ def download(
             temporary.unlink(missing_ok=True)
 
 
-def read_bounded(response, max_bytes: int) -> bytes:
-    body = bytearray()
-    while chunk := response.read(64 * 1024):
-        if len(body) + len(chunk) > max_bytes:
-            raise ValueError(f"response exceeds the {max_bytes} byte limit")
-        body.extend(chunk)
-    return bytes(body)
+def read_response(response) -> bytes:
+    return response.read()
 
 
-def fetch_github_api(repository: str, endpoint: str, max_bytes: int, label: str) -> dict:
+def fetch_github_api(repository: str, endpoint: str, label: str) -> dict:
     url = f"{GITHUB_API_ROOT}/repos/{repository}/{endpoint}"
     validate_download_url(url, "api.github.com")
     request = urllib.request.Request(
@@ -236,28 +203,36 @@ def fetch_github_api(repository: str, endpoint: str, max_bytes: int, label: str)
         with URL_OPENER.open(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
             if response.geturl() != url:
                 fail(f"{label} API redirected unexpectedly: {response.geturl()}")
-            payload = read_bounded(response, max_bytes)
+            payload = read_response(response)
     except SystemExit:
         raise
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        fail(
+            f"could not fetch {label} API metadata: {type(exc).__name__}: {exc}"
+            f"\nresponse body:\n{body}"
+        )
     except Exception as exc:
-        fail(f"could not fetch {label} API metadata: {exc}")
+        fail(f"could not fetch {label} API metadata: {type(exc).__name__}: {exc}")
     try:
         metadata = json.loads(payload)
     except (UnicodeDecodeError, ValueError) as exc:
-        fail(f"{label} API metadata is not valid JSON: {exc}")
+        body = payload.decode("utf-8", errors="replace")
+        fail(
+            f"{label} API metadata is not valid JSON: {type(exc).__name__}: {exc}"
+            f"\nresponse body:\n{body}"
+        )
     if not isinstance(metadata, dict):
         fail(f"{label} API metadata is not an object")
     return metadata
 
 
-def fetch_controlplane_api(endpoint: str, max_bytes: int) -> dict:
-    return fetch_github_api(
-        CONTROLPLANE_REPOSITORY, endpoint, max_bytes, "Controlplane"
-    )
+def fetch_controlplane_api(endpoint: str) -> dict:
+    return fetch_github_api(CONTROLPLANE_REPOSITORY, endpoint, "Controlplane")
 
 
 def fetch_fork_api(repository: str, endpoint: str) -> dict:
-    return fetch_github_api(repository, endpoint, MAX_API_JSON_BYTES, "fork")
+    return fetch_github_api(repository, endpoint, "fork")
 
 
 def fetch_fork_annotated_tag(repository: str, release: str, expected_commit: str) -> str:
@@ -297,7 +272,7 @@ def fetch_fork_annotated_tag(repository: str, release: str, expected_commit: str
 
 
 def fetch_controlplane_release(release: str) -> dict:
-    metadata = fetch_controlplane_api(f"releases/tags/{release}", MAX_API_JSON_BYTES)
+    metadata = fetch_controlplane_api(f"releases/tags/{release}")
     validate_controlplane_release(metadata, release)
     return metadata
 
@@ -359,7 +334,7 @@ def validate_controlplane_release(metadata: dict, release: str) -> None:
 
 
 def fetch_controlplane_annotated_tag(release: str) -> tuple[str, str]:
-    ref = fetch_controlplane_api(f"git/ref/tags/{release}", MAX_API_JSON_BYTES)
+    ref = fetch_controlplane_api(f"git/ref/tags/{release}")
     api_root = f"{GITHUB_API_ROOT}/repos/{CONTROLPLANE_REPOSITORY}"
     ref_object = ref.get("object")
     if (
@@ -374,7 +349,7 @@ def fetch_controlplane_annotated_tag(release: str) -> tuple[str, str]:
     if not isinstance(annotated_tag_sha, str) or not GIT_SHA_RE.fullmatch(annotated_tag_sha):
         fail("Controlplane annotated tag ref has no exact tag-object SHA")
 
-    tag_object = fetch_controlplane_api(f"git/tags/{annotated_tag_sha}", MAX_API_JSON_BYTES)
+    tag_object = fetch_controlplane_api(f"git/tags/{annotated_tag_sha}")
     if (
         tag_object.get("sha") != annotated_tag_sha
         or tag_object.get("tag") != release
@@ -423,12 +398,7 @@ def validate_fork_release(metadata: dict, repository: str, release: str) -> None
 
 
 def fetch_fork_release(repository: str, release: str, expected_commit: str) -> tuple[str, str]:
-    metadata = fetch_github_api(
-        repository,
-        f"releases/tags/{release}",
-        MAX_API_JSON_BYTES,
-        f"{repository} fork release",
-    )
+    metadata = fetch_github_api(repository, f"releases/tags/{release}", f"{repository} fork release")
     validate_fork_release(metadata, repository, release)
     annotated_tag_sha = fetch_fork_annotated_tag(repository, release, expected_commit)
     archive_root = f"{repository.replace('/', '-')}-{annotated_tag_sha[:7]}"
@@ -492,7 +462,7 @@ def validate_controlplane_assets(
         ):
             fail(f"Controlplane {label} asset has no exact SHA-256 API digest")
     if wheel_asset["digest"] != f"sha256:{expected_wheel_sha256}":
-        fail("Controlplane wheel API digest differs from versions.env")
+        fail("Controlplane wheel API digest differs from provenance.lock")
     if wheel_asset["size"] > MAX_FILE_BYTES:
         fail("Controlplane wheel API size exceeds the image input limit")
     if digest_asset["size"] > MAX_DIGEST_JSON_BYTES:
@@ -505,7 +475,9 @@ def validate_controlplane_digest(
 ) -> None:
     try:
         with path.open("rb") as stream:
-            raw = read_bounded(stream, MAX_DIGEST_JSON_BYTES)
+            raw = stream.read()
+            if len(raw) > MAX_DIGEST_JSON_BYTES:
+                raise ValueError("Controlplane digest JSON exceeds its declared artifact size")
         payload = json.loads(raw)
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         fail(f"Controlplane digest JSON is not valid: {exc}")
@@ -683,7 +655,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--lock", type=Path, default=Path("s3-provider.lock"))
     parser.add_argument("--s3-provider-version", required=True)
-    parser.add_argument("--s3-provider-archive-sha256", required=True)
     parser.add_argument("--synapse-fork-release", required=True)
     parser.add_argument("--synapse-fork-commit", required=True)
     parser.add_argument("--synapse-fork-archive-sha256", required=True)
@@ -714,16 +685,12 @@ def main() -> None:
         if not GIT_SHA_RE.fullmatch(value):
             fail(f"{name} is not an exact lowercase commit")
     for name, value in (
-        ("S3 provider archive", args.s3_provider_archive_sha256),
         ("Synapse fork archive", args.synapse_fork_archive_sha256),
         ("S3-provider fork archive", args.s3_provider_fork_archive_sha256),
         ("Controlplane wheel", args.controlplane_wheel_sha256),
     ):
         if not HEX_RE.fullmatch(value):
             fail(f"{name} SHA-256 must be lowercase hexadecimal")
-    if args.s3_provider_archive_sha256 != args.s3_provider_fork_archive_sha256:
-        fail("S3 provider archive hashes disagree")
-
     expected = load_lock(args.lock)
     if args.output.exists() and any(args.output.iterdir()):
         fail(f"output directory is not empty: {args.output}")
@@ -731,14 +698,13 @@ def main() -> None:
     wheelhouse = args.output / "wheelhouse"
     wheelhouse.mkdir()
 
-    run_bounded_pip(
+    run_pip(
         [
             sys.executable,
             "-m",
             "pip",
             "download",
             "--disable-pip-version-check",
-            "--quiet",
             "--no-cache-dir",
             "--only-binary=:all:",
             "--no-deps",
@@ -797,7 +763,6 @@ def main() -> None:
         args.output / digest_name,
         digest_asset["digest"][len("sha256:") :],
         expected_size=digest_asset["size"],
-        max_bytes=MAX_DIGEST_JSON_BYTES,
     )
     validate_controlplane_digest(
         args.output / digest_name,

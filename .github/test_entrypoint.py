@@ -189,6 +189,47 @@ class EntrypointTests(unittest.TestCase):
         ):
             self.assertEqual(entrypoint._free_bytes("/staging"), 10)
 
+    def test_open_directory_preserves_fstat_failure_and_closes_descriptor(self) -> None:
+        with mock.patch.object(entrypoint, "_directory_metadata"), mock.patch.object(
+            entrypoint.os, "open", return_value=41
+        ), mock.patch.object(
+            entrypoint.os, "fstat", side_effect=OSError("fstat failed")
+        ), mock.patch.object(entrypoint.os, "close") as close:
+            with self.assertRaises(OSError), contextlib.redirect_stderr(io.StringIO()):
+                entrypoint._open_directory("/staging/tmp", "staging child")
+        close.assert_called_once_with(41)
+
+    def test_remove_entry_preserves_operation_and_close_failures(self) -> None:
+        directory = SimpleNamespace(st_mode=stat.S_IFDIR, st_dev=7)
+        with mock.patch.object(entrypoint.os, "lstat", return_value=directory), mock.patch.object(
+            entrypoint.os, "open", return_value=42
+        ), mock.patch.object(
+            entrypoint.os, "fstat", side_effect=OSError("fstat failed")
+        ), mock.patch.object(
+            entrypoint.os, "close", side_effect=OSError("close failed")
+        ) as close, contextlib.redirect_stderr(io.StringIO()) as stderr:
+            with self.assertRaises(OSError):
+                entrypoint._remove_entry(40, "child", 7)
+        close.assert_called_once_with(42)
+        self.assertIn("descriptor cleanup also failed", stderr.getvalue())
+
+    def test_probe_write_attempts_unlink_and_all_descriptor_cleanup(self) -> None:
+        with mock.patch.object(entrypoint, "_open_directory", return_value=40), mock.patch.object(
+            entrypoint.os, "open", return_value=41
+        ), mock.patch.object(
+            entrypoint.os, "close", side_effect=lambda fd: (_ for _ in ()).throw(
+                OSError("probe close failed")
+            ) if fd == 41 else None
+        ) as close, mock.patch.object(
+            entrypoint.os, "unlink", side_effect=OSError("unlink failed")
+        ) as unlink, contextlib.redirect_stderr(io.StringIO()) as stderr:
+            with self.assertRaises(SystemExit):
+                entrypoint._probe_write("/staging/tmp")
+        unlink.assert_called_once()
+        self.assertEqual(close.call_args_list, [mock.call(41), mock.call(40)])
+        self.assertIn("staging write probe cannot be removed", stderr.getvalue())
+        self.assertIn("descriptor cleanup also failed", stderr.getvalue())
+
     def test_main_executes_synapse_after_preparation(self) -> None:
         with mock.patch.object(entrypoint, "prepare_staging"), mock.patch.object(
             entrypoint.os, "execv"

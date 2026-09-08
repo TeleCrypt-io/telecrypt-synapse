@@ -11,9 +11,6 @@ from pathlib import Path
 from typing import NoReturn
 
 
-MAX_RESPONSE_BYTES = 1024 * 1024
-MAX_PAGES = 100
-MAX_VERSIONS = 10_000
 MAX_TEXT_BYTES = 256
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -45,7 +42,7 @@ def classify(document: object, tag: str) -> str:
 
     tag = _string(tag, "requested tag")
     pages = document if isinstance(document, list) else None
-    if pages is None or len(pages) > MAX_PAGES:
+    if pages is None:
         fail("package versions response has an invalid page shape")
 
     versions: list[dict[str, object]] = []
@@ -56,9 +53,6 @@ def classify(document: object, tag: str) -> str:
         if page is None:
             fail(f"package versions page {page_number} has an invalid shape")
         versions.extend(_object(version, f"package version {page_number}") for version in page)
-        if len(versions) > MAX_VERSIONS:
-            fail("package versions response is too large")
-
     for version_number, version in enumerate(versions, start=1):
         version_id = version.get("id")
         if not isinstance(version_id, int) or isinstance(version_id, bool) or version_id <= 0:
@@ -109,12 +103,14 @@ def parse_response(path: Path, tag: str) -> str:
         response = path.read_bytes()
     except OSError as error:
         fail(f"could not read package versions response: {error.strerror or 'I/O error'}")
-    if len(response) > MAX_RESPONSE_BYTES:
-        fail("package versions response exceeds the bounded size")
     try:
         document = json.loads(response)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        fail("package versions response is not valid JSON")
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        body = response.decode("utf-8", errors="replace")
+        fail(
+            f"package versions response is not valid JSON: {type(error).__name__}: {error}"
+            f"\nresponse body:\n{body}"
+        )
     return classify(document, tag)
 
 

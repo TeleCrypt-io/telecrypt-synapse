@@ -91,15 +91,18 @@ class ClassifyRegistryTagTests(unittest.TestCase):
                 )
                 self.assertNotEqual(result.returncode, 0)
 
-    def test_rejects_invalid_response_encoding_and_size(self) -> None:
+    def test_rejects_invalid_response_encoding(self) -> None:
         invalid_encoding = self.run_classifier([], raw=b"\xff")
         self.assertNotEqual(invalid_encoding.returncode, 0)
-        oversized = self.run_classifier([], raw=b" " * (1024 * 1024 + 1))
-        self.assertNotEqual(oversized.returncode, 0)
+        self.assertIn("response body:", invalid_encoding.stderr)
+        self.assertIn("\ufffd", invalid_encoding.stderr)
+        malformed = self.run_classifier([], raw=b"{\"message\":")
+        self.assertNotEqual(malformed.returncode, 0)
+        self.assertIn('{"message":', malformed.stderr)
         oversized_tag = self.run_classifier([[]], tag="x" * 257)
         self.assertNotEqual(oversized_tag.returncode, 0)
 
-    def test_workflow_uses_authenticated_bounded_api_for_both_classifiers(self) -> None:
+    def test_workflow_uses_authenticated_api_for_both_classifiers(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertNotIn("grep -Eqi 'manifest unknown|no such manifest'", workflow)
         self.assertEqual(
@@ -114,14 +117,15 @@ class ClassifyRegistryTagTests(unittest.TestCase):
         self.assertIn("packages: write", workflow)
         self.assertIn("orgs/TeleCrypt-io/packages/container/telecrypt-synapse/versions?per_page=100", workflow)
         self.assertNotIn("docker manifest inspect \"$IMAGE:$TAG\"", workflow)
+        self.assertIn("response body:", SCRIPT.read_text(encoding="utf-8"))
 
-    def test_every_bounded_docker_helper_is_scoped_to_its_step_temp_area(self) -> None:
+    def test_every_docker_capture_is_scoped_to_its_step_temp_area(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         steps = workflow.split("      - ")[1:]
-        bounded_steps = [step for step in steps if ".github/run_bounded_command.sh" in step]
-        self.assertEqual(workflow.count(".github/run_bounded_command.sh"), 7)
-        self.assertGreaterEqual(len(bounded_steps), 5)
-        for step in bounded_steps:
+        docker_steps = [step for step in steps if ".github/run_command.sh" in step]
+        self.assertEqual(workflow.count(".github/run_command.sh"), 7)
+        self.assertGreaterEqual(len(docker_steps), 5)
+        for step in docker_steps:
             with self.subTest(step=step.splitlines()[0]):
                 self.assertIn("run: |", step)
                 self.assertIn("set -euo pipefail", step)

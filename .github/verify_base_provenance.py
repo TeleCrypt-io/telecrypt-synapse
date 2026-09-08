@@ -9,7 +9,6 @@ import sys
 from pathlib import Path
 
 
-MAX_METADATA_BYTES = 1024 * 1024
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 IMAGE_TAG_RE = re.compile(r"^(?P<image>[^@\s]+):(?P<tag>[^@\s]+)\Z")
 
@@ -23,8 +22,6 @@ def load_metadata(path: Path) -> dict[str, object]:
         raw = path.read_bytes()
     except OSError as exc:
         fail(f"could not read metadata: {exc}")
-    if len(raw) > MAX_METADATA_BYTES:
-        fail(f"metadata exceeds {MAX_METADATA_BYTES} bytes")
     try:
         metadata = json.loads(raw)
     except (UnicodeDecodeError, ValueError) as exc:

@@ -2,6 +2,9 @@
 
 Public, reproducible Synapse image for TeleCrypt.
 
+Current TeleCrypt project facts and architecture decisions are maintained only in the canonical
+[`llms.txt`](https://telecrypt.io/llms.txt); this README documents the image build and release.
+
 ```text
 official Synapse release
   + exact TeleCrypt Synapse fork source archive
@@ -26,9 +29,9 @@ zeros in any numeric component.
   accepts an existing GHCR tag only when it proves the exact tested image identity and digest;
   otherwise it fails closed.
 
-The exact upstream patch version, TeleCrypt fork release names and commits, Controlplane wheel
-release, source-archive identities (derived from those release names) and digests, and Controlplane
-wheel digest are recorded together in the checked-in `versions.env` and `provenance.lock` files.
+The checked-in `versions.env` owns exact upstream versions and the Controlplane release selector.
+The checked-in `provenance.lock` owns the corresponding fork releases and commits, source-archive
+digests, and Controlplane wheel digest.
 Before downloading either fork archive,
 the workflow fetches the exact GitHub Release by tag and requires `draft: false`, `prerelease: false`,
 explicit `immutable: true`, zero uploaded assets, and an annotated tag that peels to the locked fork
@@ -57,9 +60,12 @@ Images are built only by this repository's GitHub Actions workflows. Pull reques
 candidate smoke test, as do main-branch pushes; publication is allowed only from the matching
 annotated Git tag after that test passes. There is no scheduled publisher or automatic release
 discovery. The policy unit suite belongs to Controlplane. This workflow never deploys to TeleCrypt
-infrastructure, and a failed candidate is not published.
+infrastructure, and a failed candidate is not published. Checkout-only credentials are removed before
+strict Git checks; only Git's documented no-match statuses are treated as absent. Required Git
+fetches, Docker pulls and loads, and package downloads retain their normal progress, warning, and
+error output.
 
-GitHub Release publication is draft-first and bounded. An authenticated lookup by exact tag
+GitHub Release publication is draft-first and exact. An authenticated lookup by exact tag
 recovers an interrupted create, and a draft with no asset or a same-name interrupted upload is
 repaired from the already-tested record. Unexpected or ambiguous assets fail closed. A pre-existing
 published Release is refused; only the same exact draft may be resumed.
@@ -90,8 +96,8 @@ runtime.
 - Base: `ghcr.io/element-hq/synapse:v<version>`, with the upstream commit recorded in `provenance.lock`.
 - Media provider: the TeleCrypt fork of [`matrix-org/synapse-s3-storage-provider`](https://github.com/TeleCrypt-io/synapse-s3-storage-provider), preserving its Apache-2.0 license and pinned by immutable fork release, commit, and source-archive hash in `provenance.lock`.
 - Policy: [`TeleCrypt-io/controlplane`](https://github.com/TeleCrypt-io/controlplane), installed as a
-  `telecrypt_tier_controller` wheel from the exact public GitHub Release 0.5.14. Its exact SHA-256
-  digest is recorded in `versions.env` and verified before the offline image build.
+  `telecrypt_tier_controller` wheel from the exact public GitHub Release selected in `versions.env`.
+  Its exact SHA-256 digest is recorded in `provenance.lock` and verified before the offline image build.
 
 The upstream Synapse base remains an exact release version rather than a digest-pinned setting. Each
 build records the current linux/amd64 manifest digest for that version tag in the image's OCI base

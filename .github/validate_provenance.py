@@ -21,7 +21,6 @@ REQUIRED_KEYS = (
     "S3_PROVIDER_FORK_RELEASE",
     "S3_PROVIDER_FORK_COMMIT",
     "S3_PROVIDER_FORK_ARCHIVE_SHA256",
-    "CONTROLPLANE_RELEASE",
     "CONTROLPLANE_WHEEL_SHA256",
 )
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -100,12 +99,6 @@ def validate_against_versions(values: dict[str, str], versions_path: Path) -> No
         fail("Synapse upstream tag differs from versions.env")
     if values["S3_PROVIDER_UPSTREAM_TAG"] != f"v{versions['S3_PROVIDER_VERSION']}":
         fail("S3-provider upstream tag differs from versions.env")
-    if values["CONTROLPLANE_RELEASE"] != versions["CONTROLPLANE_RELEASE"]:
-        fail("Controlplane release differs from versions.env")
-    if values["S3_PROVIDER_FORK_ARCHIVE_SHA256"] != versions["S3_PROVIDER_ARCHIVE_SHA256"]:
-        fail("S3-provider fork archive hash differs from versions.env")
-    if values["CONTROLPLANE_WHEEL_SHA256"] != versions["CONTROLPLANE_WHEEL_SHA256"]:
-        fail("Controlplane wheel hash differs from versions.env")
 
 
 def main() -> None:

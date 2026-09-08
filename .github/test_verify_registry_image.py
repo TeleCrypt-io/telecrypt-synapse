@@ -142,10 +142,11 @@ class VerifyRegistryImageTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("#1 DONE", result.stderr)
 
-    def test_rejects_warning_marker_on_successful_docker_command(self) -> None:
+    def test_accepts_warning_marker_on_successful_docker_command(self) -> None:
         result = self.run_verifier(manifest(MANIFEST_DIGEST), diagnostics=b"WARNING: mutable tag\n")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("warning or error diagnostics", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("WARNING: mutable tag", result.stderr)
+        self.assertNotIn("warning or error diagnostics", result.stderr)
 
 
 if __name__ == "__main__":

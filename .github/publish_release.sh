@@ -15,8 +15,6 @@ readonly REPOSITORY='TeleCrypt-io/telecrypt-synapse'
 readonly IMAGE='ghcr.io/telecrypt-io/telecrypt-synapse'
 readonly RELEASE_BODY="Exact Synapse release for source commit $EXPECTED_SHA."
 readonly MAX_RECORD_BYTES=$((64 * 1024))
-readonly MAX_API_BYTES=$((1024 * 1024))
-readonly MAX_COMMAND_BYTES=$((64 * 1024))
 readonly MAX_ASSET_BYTES=$((64 * 1024))
 readonly REQUIRED_API_VERSION='2026-03-10'
 
@@ -48,27 +46,94 @@ release_page_headers="$(mktemp)"
 release_page_json="$(mktemp)"
 release_matches="$(mktemp)"
 release_id=''
-cleanup() { rm -f -- "$canonical_record" "$release_json" "$release_error" "$downloaded_asset" "$release_headers" "$release_page_headers" "$release_page_json" "$release_matches" "$release_json.create.log" "$release_json.create.error" "$release_json.upload.log" "$release_json.upload.error" "$release_json.edit.log" "$release_json.edit.error"; }
-trap cleanup EXIT
-trap 'cleanup; exit 143' HUP INT TERM
+cleanup() {
+  local failed=0 path
+  for path in "$canonical_record" "$release_json" "$release_error" "$downloaded_asset" \
+    "$release_headers" "$release_page_headers" "$release_page_json" "$release_matches" \
+    "$release_json.create.log" "$release_json.create.error"; do
+    if ! rm -f -- "$path"; then
+      echo "ERROR: could not remove release publication temporary file: $path" >&2
+      failed=1
+    fi
+  done
+  return "$failed"
+}
+on_exit() {
+  local status=$? cleanup_status
+  set +e
+  cleanup
+  cleanup_status=$?
+  if [[ "$status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
+    return "$cleanup_status"
+  fi
+  return "$status"
+}
+trap on_exit EXIT
+active_command_pid=''
+replay_diagnostics() {
+  local path status=0
+  for path in "$release_json" "$release_error" "$release_headers" "$release_page_headers" \
+    "$release_page_json" "$release_matches" "$release_json.create.log" "$release_json.create.error"; do
+    if [[ -f "$path" ]] && ! cat -- "$path" >&2; then
+      echo "ERROR: could not replay release publication diagnostics: $path" >&2
+      status=1
+    fi
+  done
+  return "$status"
+}
+on_signal() {
+  local signal_name="$1" exit_status=143 probe_status=0 kill_status=0 wait_status=0 replay_status=0 cleanup_status=0
+  case "$signal_name" in
+    HUP) exit_status=129 ;;
+    INT) exit_status=130 ;;
+  esac
+  set +e
+  trap - EXIT HUP INT TERM
+  if [[ -n "$active_command_pid" ]]; then
+    kill -0 "$active_command_pid" 2>/dev/null
+    probe_status=$?
+    if [[ "$probe_status" -eq 0 ]]; then
+      kill -"$signal_name" "$active_command_pid"
+      kill_status=$?
+      if [[ "$kill_status" -ne 0 ]]; then
+        printf 'ERROR: release publication child termination failed during %s (status %s)\n' "$signal_name" "$kill_status" >&2
+      fi
+    elif [[ "$probe_status" -ne 1 ]]; then
+      printf 'ERROR: release publication child liveness check failed during %s (status %s)\n' "$signal_name" "$probe_status" >&2
+    fi
+    wait "$active_command_pid"
+    wait_status=$?
+    if [[ "$wait_status" -ne 0 && "$wait_status" -ne "$exit_status" ]]; then
+      printf 'ERROR: release publication child wait failed during %s (status %s)\n' "$signal_name" "$wait_status" >&2
+    fi
+    active_command_pid=''
+  fi
+  replay_diagnostics || replay_status=$?
+  cleanup || cleanup_status=$?
+  if [[ "$probe_status" -gt 1 || "$kill_status" -ne 0 || "$wait_status" -ne 0 && "$wait_status" -ne "$exit_status" || "$replay_status" -ne 0 || "$cleanup_status" -ne 0 ]]; then
+    exit_status=1
+  fi
+  exit "$exit_status"
+}
+trap 'on_signal HUP' HUP
+trap 'on_signal INT' INT
+trap 'on_signal TERM' TERM
 jq -cS . "$RELEASE_RECORD" >"$canonical_record"
 cmp "$RELEASE_RECORD" "$canonical_record"
 
-bounded_command() {
-  local max_bytes="$1" output="$2" stderr="$3" timeout_seconds="$4" status
-  shift 4
-  (( max_bytes > 0 && max_bytes % 1024 == 0 )) || return 64
+capture_command() {
+  local output="$1" stderr="$2" timeout_seconds="$3" status
+  shift 3
   rm -f -- "$output" "$stderr"
-  if /usr/bin/python3 "$(dirname -- "${BASH_SOURCE[0]}")/bounded-command.py" \
-    --stdout-limit "$max_bytes" --stderr-limit "$max_bytes" \
-    --stdout-path "$output" --stderr-path "$stderr" --timeout "$timeout_seconds" -- "$@"; then
-    status=0
-  else
-    status=$?
-  fi
+  set +e
+  timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" "$@" >"$output" 2>"$stderr" &
+  active_command_pid=$!
+  wait "$active_command_pid"
+  status=$?
+  active_command_pid=''
+  set -e
   if [[ "$status" -eq 0 && -s "$stderr" ]]; then
     cat -- "$stderr" >&2
-    return 1
   fi
   return "$status"
 }
@@ -87,8 +152,8 @@ http_body() {
 discover_release_id() {
   local page page_size complete=0 command_status code match_count
   : >"$release_matches"
-  for page in $(seq 1 10); do
-    if bounded_command "$MAX_API_BYTES" "$release_page_headers" "$release_error" 30 \
+  for (( page=1; ; page++ )); do
+    if capture_command "$release_page_headers" "$release_error" 30 \
       gh api --include --hostname github.com --header 'Accept: application/vnd.github+json' \
       --header "X-GitHub-Api-Version: $GH_API_VERSION" \
       "repos/$REPOSITORY/releases?per_page=100&page=$page"; then
@@ -96,25 +161,49 @@ discover_release_id() {
     else
       command_status=$?
     fi
-    test "$command_status" -eq 0 || return 1
-    test "$(wc -c <"$release_page_headers")" -le "$MAX_API_BYTES" || return 1
-    test "$(wc -c <"$release_error")" -le "$MAX_API_BYTES" || return 1
-    code="$(http_status "$release_page_headers")" || return 1
-    test "$code" = 200 || return 1
-    http_body "$release_page_headers" >"$release_page_json"
-    test "$(wc -c <"$release_page_json")" -le "$MAX_API_BYTES" || return 1
+    if [[ "$command_status" -ne 0 ]]; then
+      cat -- "$release_page_headers" "$release_error" >&2
+      return 1
+    fi
+    if ! code="$(http_status "$release_page_headers")"; then
+      cat -- "$release_page_headers" "$release_error" >&2
+      return 1
+    fi
+    if [[ "$code" != 200 ]]; then
+      cat -- "$release_page_headers" "$release_error" >&2
+      return 1
+    fi
+    if ! http_body "$release_page_headers" >"$release_page_json"; then
+      cat -- "$release_page_headers" "$release_error" >&2
+      return 1
+    fi
     jq -e 'type == "array" and length <= 100 and all(.[]; type == "object" and (.tag_name | type == "string"))' \
-      "$release_page_json" >/dev/null || return 1
+      "$release_page_json" >/dev/null || {
+      cat -- "$release_page_headers" "$release_error" >&2
+      return 1
+    }
     jq -c --arg tag "$EXPECTED_TAG" '.[] | select(.tag_name == $tag)' \
-      "$release_page_json" >>"$release_matches" || return 1
-    page_size="$(jq -er 'length' "$release_page_json")" || return 1
+      "$release_page_json" >>"$release_matches" || {
+      cat -- "$release_page_headers" "$release_error" >&2
+      return 1
+    }
+    if ! page_size="$(jq -er 'length' "$release_page_json")"; then
+      cat -- "$release_page_headers" "$release_error" >&2
+      return 1
+    fi
     if (( page_size < 100 )); then
       complete=1
       break
     fi
   done
-  test "$complete" -eq 1 || return 1
-  match_count="$(wc -l <"$release_matches")" || return 1
+  if [[ "$complete" -ne 1 ]]; then
+    cat -- "$release_page_headers" "$release_error" >&2
+    return 1
+  fi
+  if ! match_count="$(wc -l <"$release_matches")"; then
+    cat -- "$release_page_headers" "$release_error" >&2
+    return 1
+  fi
   case "$match_count" in
     0)
       return 4
@@ -132,7 +221,7 @@ discover_release_id() {
 
 get_release_by_id() {
   local command_status code
-  if bounded_command "$MAX_API_BYTES" "$release_headers" "$release_error" 30 \
+  if capture_command "$release_headers" "$release_error" 30 \
     gh api --include --hostname github.com --header 'Accept: application/vnd.github+json' \
     --header "X-GitHub-Api-Version: $GH_API_VERSION" \
     "repos/$REPOSITORY/releases/$release_id"; then
@@ -140,21 +229,29 @@ get_release_by_id() {
   else
     command_status=$?
   fi
-  test "$(wc -c <"$release_headers")" -le "$MAX_API_BYTES" || return 1
-  test "$(wc -c <"$release_error")" -le "$MAX_API_BYTES" || return 1
-  code="$(http_status "$release_headers")" || return 1
+  if [[ "$command_status" -ne 0 ]]; then
+    cat -- "$release_headers" "$release_error" >&2
+    return 1
+  fi
+  if ! code="$(http_status "$release_headers")"; then
+    cat -- "$release_headers" "$release_error" >&2
+    return 1
+  fi
   case "$code" in
     200)
-      test "$command_status" -eq 0 || return 1
-      test ! -s "$release_error" || return 1
-      http_body "$release_headers" >"$release_json" || return 1
-      test "$(wc -c <"$release_json")" -le "$MAX_API_BYTES" || return 1
+      if ! http_body "$release_headers" >"$release_json"; then
+        cat -- "$release_headers" "$release_error" >&2
+        return 1
+      fi
       jq -e --argjson release_id "$release_id" \
-        'type == "object" and .id == $release_id' "$release_json" >/dev/null || return 1
+        'type == "object" and .id == $release_id' "$release_json" >/dev/null || {
+        cat -- "$release_headers" "$release_error" >&2
+        return 1
+      }
       return 0
       ;;
     *)
-      cat -- "$release_error" >&2
+      cat -- "$release_headers" "$release_error" >&2
       return 1
       ;;
   esac
@@ -182,17 +279,18 @@ check_draft() {
 
 if get_release; then
   if ! check_draft; then
+    replay_diagnostics
     echo 'pre-existing release does not match the exact recoverable draft contract' >&2
     exit 1
   fi
 else
   status=$?
   if [[ "$status" -ne 4 ]]; then
-    cat -- "$release_error" >&2
+    cat -- "$release_page_headers" "$release_error" >&2
     printf 'release discovery failed (status %s)\n' "$status" >&2
     exit 1
   fi
-  if bounded_command "$MAX_COMMAND_BYTES" "$release_json.create.log" "$release_json.create.error" 60 \
+  if capture_command "$release_json.create.log" "$release_json.create.error" 60 \
     gh api --include --hostname github.com --method POST \
       --header 'Accept: application/vnd.github+json' \
       --header "X-GitHub-Api-Version: $GH_API_VERSION" \
@@ -204,7 +302,7 @@ else
   else
     create_status=$?
   fi
-  if [[ "$create_status" -ne 0 || -s "$release_json.create.error" ]]; then
+  if [[ "$create_status" -ne 0 ]]; then
     cat -- "$release_json.create.log" "$release_json.create.error" >&2
     printf 'release draft creation failed (status %s)\n' "$create_status" >&2
     exit 1
@@ -221,58 +319,68 @@ else
     exit 1
   fi
   if ! check_draft; then
+    replay_diagnostics
     echo 'created release draft does not match the exact empty-draft contract' >&2
     exit 1
   fi
   if ! get_release_by_id; then
-    cat -- "$release_error" >&2
+    replay_diagnostics
     echo 'created release draft could not be read back by its numeric id' >&2
     exit 1
   fi
   if ! check_draft; then
+    replay_diagnostics
     echo 'created release draft readback differs from the exact empty-draft contract' >&2
     exit 1
   fi
 fi
 
-asset_count="$(jq -er '.assets|length' "$release_json")"
+if ! asset_count="$(jq -er '.assets|length' "$release_json")"; then
+  replay_diagnostics
+  echo 'release draft asset count could not be read from the API response' >&2
+  exit 1
+fi
 if [[ "$asset_count" -eq 0 ]]; then
   test "$record_size" -le "$MAX_ASSET_BYTES"
-  if bounded_command "$MAX_COMMAND_BYTES" "$release_json.upload.log" "$release_json.upload.error" 120 \
+  set +e
+  timeout --signal=TERM --kill-after=5s 120s \
     gh api --include --hostname github.com --method POST \
       --header 'Accept: application/vnd.github+json' \
       --header "X-GitHub-Api-Version: $GH_API_VERSION" \
       --header 'Content-Type: application/octet-stream' --input "$RELEASE_RECORD" \
-      "https://uploads.github.com/repos/$REPOSITORY/releases/$release_id/assets?name=$RELEASE_ASSET_NAME"; then
-    upload_status=0
-  else
-    upload_status=$?
-  fi
-  if [[ "$upload_status" -ne 0 || -s "$release_json.upload.error" ]]; then
-    cat -- "$release_json.upload.log" "$release_json.upload.error" >&2
+      "https://uploads.github.com/repos/$REPOSITORY/releases/$release_id/assets?name=$RELEASE_ASSET_NAME" &
+  active_command_pid=$!
+  wait "$active_command_pid"
+  upload_status=$?
+  active_command_pid=''
+  set -e
+  if [[ "$upload_status" -ne 0 ]]; then
     printf 'release asset upload failed (status %s)\n' "$upload_status" >&2
     exit 1
   fi
 fi
 if ! get_release_by_id; then
-  cat -- "$release_error" >&2
+  replay_diagnostics
   echo 'release draft could not be read back after asset upload' >&2
   exit 1
 fi
 if ! check_draft; then
+  replay_diagnostics
   echo 'release draft differs from the exact pre-publication contract' >&2
   exit 1
 fi
 if ! jq -e '(.assets | length) == 1' "$release_json" >/dev/null; then
+  replay_diagnostics
   echo 'release draft does not contain the exact uploaded asset' >&2
   exit 1
 fi
 if ! asset_id="$(jq -er --arg asset "$RELEASE_ASSET_NAME" \
   '.assets | select(length == 1) | .[0] | select(.name == $asset) | .id | select(type == "number" and . > 0 and . == floor)' "$release_json")"; then
+  replay_diagnostics
   echo 'release draft asset has no valid numeric id' >&2
   exit 1
 fi
-if ! bounded_command "$MAX_ASSET_BYTES" "$downloaded_asset" "$release_error" 120 \
+if ! capture_command "$downloaded_asset" "$release_error" 120 \
   gh api --hostname github.com --header 'Accept: application/octet-stream' \
     --header "X-GitHub-Api-Version: $GH_API_VERSION" \
     "repos/$REPOSITORY/releases/assets/$asset_id"; then
@@ -284,41 +392,51 @@ if ! test "$(wc -c <"$downloaded_asset")" -le "$MAX_ASSET_BYTES" \
   || ! cmp "$RELEASE_RECORD" "$downloaded_asset" \
   || ! test "$(wc -c <"$downloaded_asset")" = "$record_size" \
   || ! test "sha256:$(sha256sum "$downloaded_asset" | awk '{print $1}')" = "$record_digest"; then
+  replay_diagnostics
   echo 'downloaded draft asset differs from the exact release record' >&2
   exit 1
 fi
-if bounded_command "$MAX_COMMAND_BYTES" "$release_json.edit.log" "$release_json.edit.error" 60 \
+set +e
+timeout --signal=TERM --kill-after=5s 60s \
   gh api --include --hostname github.com --method PATCH \
     --header 'Accept: application/vnd.github+json' \
     --header "X-GitHub-Api-Version: $GH_API_VERSION" \
     --field draft=false --field prerelease=false --field "name=$EXPECTED_TAG" \
-    --field "body=$RELEASE_BODY" "repos/$REPOSITORY/releases/$release_id"; then
-  edit_status=0
-else
-  edit_status=$?
-fi
+    --field "body=$RELEASE_BODY" "repos/$REPOSITORY/releases/$release_id" &
+active_command_pid=$!
+wait "$active_command_pid"
+edit_status=$?
+active_command_pid=''
+set -e
 if ! get_release_by_id; then
-  cat -- "$release_json.edit.log" "$release_json.edit.error" "$release_error" >&2
+  replay_diagnostics
   printf 'published release could not be read back after PATCH (status %s)\n' "$edit_status" >&2
   exit 1
 fi
 numeric_release_id="$release_id"
-jq -e --argjson release_id "$numeric_release_id" '.id == $release_id' "$release_json" >/dev/null
+if ! jq -e --argjson release_id "$numeric_release_id" '.id == $release_id' "$release_json" >/dev/null; then
+  replay_diagnostics
+  echo 'published release readback has a different numeric id' >&2
+  exit 1
+fi
 
 if ! env EXPECTED_TAG="$EXPECTED_TAG" RELEASE_ASSET_NAME="$RELEASE_ASSET_NAME" \
   RELEASE_BODY="$RELEASE_BODY" RECORD_DIGEST="$record_digest" RECORD_SIZE="$record_size" \
   PYTHONDONTWRITEBYTECODE=1 python3 .github/validate_release.py "$release_json"; then
-  cat -- "$release_json.edit.log" "$release_json.edit.error" >&2
+  replay_diagnostics
   printf 'release publication failed after PATCH (status %s)\n' "$edit_status" >&2
   exit 1
 fi
-if [[ "$edit_status" -ne 0 || -s "$release_json.edit.error" ]]; then
-  cat -- "$release_json.edit.log" "$release_json.edit.error" >&2
+if [[ "$edit_status" -ne 0 ]]; then
   printf 'release PATCH transport returned status %s; exact immutable readback resolved the outcome\n' "$edit_status" >&2
 fi
-asset_id="$(jq -er '.assets[0].id | select(type == "number" and . > 0 and . == floor)' "$release_json")"
-[[ "$asset_id" =~ ^[1-9][0-9]*$ ]]
-if ! bounded_command "$MAX_ASSET_BYTES" "$downloaded_asset" "$release_error" 120 \
+if ! asset_id="$(jq -er '.assets[0].id | select(type == "number" and . > 0 and . == floor)' "$release_json")" \
+  || [[ ! "$asset_id" =~ ^[1-9][0-9]*$ ]]; then
+  replay_diagnostics
+  echo 'published release asset id is not a positive integer' >&2
+  exit 1
+fi
+if ! capture_command "$downloaded_asset" "$release_error" 120 \
   gh api --hostname github.com --header 'Accept: application/octet-stream' \
     --header "X-GitHub-Api-Version: $GH_API_VERSION" \
     "repos/$REPOSITORY/releases/assets/$asset_id"; then
@@ -330,6 +448,7 @@ if ! test "$(wc -c <"$downloaded_asset")" -le "$MAX_ASSET_BYTES" \
   || ! cmp "$RELEASE_RECORD" "$downloaded_asset" \
   || ! test "$(wc -c <"$downloaded_asset")" = "$record_size" \
   || ! test "sha256:$(sha256sum "$downloaded_asset" | awk '{print $1}')" = "$record_digest"; then
+  replay_diagnostics
   echo 'immutable release asset differs from the exact release record' >&2
   exit 1
 fi

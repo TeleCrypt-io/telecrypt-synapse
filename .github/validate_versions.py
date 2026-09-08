@@ -14,11 +14,9 @@ VERSION_KEYS = (
     "S3_PROVIDER_VERSION",
     "CONTROLPLANE_RELEASE",
 )
-HASH_KEYS = ("S3_PROVIDER_ARCHIVE_SHA256", "CONTROLPLANE_WHEEL_SHA256")
-ALL_KEYS = (*VERSION_KEYS, *HASH_KEYS)
+ALL_KEYS = VERSION_KEYS
 VERSION_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
 REVISION_RE = re.compile(r"[1-9][0-9]*\Z")
-SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def fail(message: str) -> None:
@@ -52,9 +50,6 @@ def load_versions(path: Path) -> dict[str, str]:
         pattern = REVISION_RE if key == "TELECRYPT_REVISION" else VERSION_RE
         if not pattern.fullmatch(value):
             fail(f"{key} must be an exact numeric release, got {value!r}")
-    for key in HASH_KEYS:
-        if not SHA256_RE.fullmatch(values[key]):
-            fail(f"{key} must be a lowercase SHA-256 digest, got {values[key]!r}")
     return values
 
 

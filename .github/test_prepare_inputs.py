@@ -14,6 +14,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from urllib.error import HTTPError
 import urllib.request
 from unittest import mock
 
@@ -169,13 +170,13 @@ class PrepareInputsTests(unittest.TestCase):
             [prepare_inputs.GITHUB_API_ACCEPT, prepare_inputs.BINARY_ACCEPT],
         )
 
-    def test_bounded_pip_accepts_silent_success(self) -> None:
-        prepare_inputs.run_bounded_pip([sys.executable, "-c", "pass"])
+    def test_pip_accepts_silent_success(self) -> None:
+        prepare_inputs.run_pip([sys.executable, "-c", "pass"])
 
-    def test_bounded_pip_surfaces_failure_diagnostics(self) -> None:
+    def test_pip_surfaces_failure_diagnostics(self) -> None:
         diagnostics = io.StringIO()
         with redirect_stderr(diagnostics), self.assertRaises(SystemExit) as failure:
-            prepare_inputs.run_bounded_pip(
+            prepare_inputs.run_pip(
                 [
                     sys.executable,
                     "-c",
@@ -185,14 +186,59 @@ class PrepareInputsTests(unittest.TestCase):
         self.assertIn("fixture failure", diagnostics.getvalue())
         self.assertIn("exit code 2", str(failure.exception))
 
-    def test_bounded_pip_rejects_and_surfaces_success_diagnostics(self) -> None:
+    def test_pip_preserves_success_diagnostics(self) -> None:
         diagnostics = io.StringIO()
-        with redirect_stderr(diagnostics), self.assertRaises(SystemExit) as failure:
-            prepare_inputs.run_bounded_pip(
-                [sys.executable, "-c", "print('unexpected output')"]
-            )
-        self.assertIn("unexpected output", diagnostics.getvalue())
-        self.assertIn("unexpected diagnostics", str(failure.exception))
+        with redirect_stderr(diagnostics):
+            prepare_inputs.run_pip([sys.executable, "-c", "print('normal output')"])
+        self.assertIn("normal output", diagnostics.getvalue())
+
+    def test_github_api_preserves_http_error_body(self) -> None:
+        error = HTTPError(
+            "https://api.github.com/repos/TeleCrypt-io/controlplane/releases/tags/0.4.0",
+            503,
+            "service unavailable",
+            hdrs=None,
+            fp=io.BytesIO(b"github API failure body"),
+        )
+        with mock.patch.object(prepare_inputs.URL_OPENER, "open", side_effect=error):
+            with self.assertRaises(SystemExit) as failure:
+                prepare_inputs.fetch_github_api(
+                    "TeleCrypt-io/controlplane", "releases/tags/0.4.0", "Controlplane"
+                )
+        self.assertIn("github API failure body", str(failure.exception))
+
+    def test_github_api_preserves_malformed_body(self) -> None:
+        url = "https://api.github.com/repos/TeleCrypt-io/controlplane/releases/tags/0.4.0"
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.__exit__.return_value = None
+        response.geturl.return_value = url
+        response.read.return_value = b'{"release":'
+        with mock.patch.object(prepare_inputs.URL_OPENER, "open", return_value=response):
+            with self.assertRaises(SystemExit) as failure:
+                prepare_inputs.fetch_github_api(
+                    "TeleCrypt-io/controlplane", "releases/tags/0.4.0", "Controlplane"
+                )
+        self.assertIn('{"release":', str(failure.exception))
+
+    def test_load_image_preserves_docker_exit_status(self) -> None:
+        script = (Path(__file__).resolve().parent / "load_image.sh").read_text(encoding="utf-8")
+        self.assertIn('exit "$status"', script)
+        self.assertNotIn("cat -- \"$stdout_file\" \"$stderr_file\" >&2\n  exit 1", script)
+        self.assertNotRegex(script, r"kill [^\n]*\|\| true")
+        self.assertNotRegex(script, r"wait [^\n]*\|\| true")
+        self.assertIn("docker load child wait failed", script)
+
+    def test_signal_wrappers_retain_termination_and_wait_failures(self) -> None:
+        for name in ("strict_git_fetch.sh", "publish_release.sh", "verify_registry_image.sh", "run_command.sh"):
+            script = (Path(__file__).resolve().parent / name).read_text(encoding="utf-8")
+            self.assertNotRegex(script, r"kill [^\n]*\|\| true", name)
+            self.assertNotRegex(script, r"wait [^\n]*\|\| true", name)
+            self.assertRegex(script, r"child wait failed", name)
+
+    def test_release_validator_preserves_malformed_body(self) -> None:
+        script = (Path(__file__).resolve().parent / "validate_release.py").read_text(encoding="utf-8")
+        self.assertIn("response body:", script)
 
     def run_publish_release(
         self, record_bytes: bytes, **changes: str
@@ -318,7 +364,7 @@ class PrepareInputsTests(unittest.TestCase):
         with mock.patch.object(
             prepare_inputs,
             "fetch_github_api",
-            side_effect=lambda repository, endpoint, max_bytes, label: responses[endpoint],
+            side_effect=lambda repository, endpoint, label: responses[endpoint],
         ):
             self.assertEqual(
                 prepare_inputs.fetch_fork_release(
@@ -332,7 +378,7 @@ class PrepareInputsTests(unittest.TestCase):
         with mock.patch.object(
             prepare_inputs,
             "fetch_github_api",
-            side_effect=lambda repository, endpoint, max_bytes, label: {
+            side_effect=lambda repository, endpoint, label: {
                 **responses[endpoint],
                 **({"immutable": False} if endpoint.startswith("releases/") else {}),
             },
@@ -808,40 +854,16 @@ class PrepareInputsTests(unittest.TestCase):
             self.assertNotIn("releases/123", log.read_text(encoding="utf-8"))
             self.assertNotIn("releases/124", log.read_text(encoding="utf-8"))
 
-    def test_publish_release_uses_machine_http_status_and_rejects_oversize_api_output(self) -> None:
-        payload = synapse_record()
-        with tempfile.TemporaryDirectory() as directory:
-            directory_path = Path(directory)
-            fake_gh = directory_path / "gh"
-            mode = directory_path / "mode"
-            log = directory_path / "gh.log"
-            fake_gh.write_text(
-                "#!/bin/sh\n"
-                "printf '%s\\n' \"$*\" >> \"$FAKE_GH_LOG\"\n"
-                "if [ \"$1\" = api ]; then\n"
-                "  if [ \"$(cat \"$FAKE_GH_MODE\")\" = 404 ]; then printf 'HTTP/1.1 404 Not Found\\n\\n'; printf 'unrelated diagnostic\\n' >&2; exit 1; fi\n"
-                "  printf 'HTTP/1.1 200 OK\\n\\n'; head -c 1100000 /dev/zero; exit 0\n"
-                "fi\n"
-                "exit 99\n",
-                encoding="utf-8",
-            )
-            fake_gh.chmod(0o755)
-            mode.write_text("404\n", encoding="utf-8")
-            environment = {
-                "PATH": f"{directory}:{os.environ['PATH']}",
-                "FAKE_GH_LOG": str(log),
-                "FAKE_GH_MODE": str(mode),
-                "RELEASE_ASSET_NAME": "telecrypt-synapse-1.159-tc3.digest.json",
-            }
-            result = self.run_publish_release(payload, **environment)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("release discovery failed", result.stderr)
-            mode.write_text("oversize\n", encoding="utf-8")
-            result = self.run_publish_release(payload, **environment)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("release discovery failed", result.stderr)
+    def test_publish_release_keeps_complete_api_output(self) -> None:
+        script = (Path(__file__).resolve().parent / "publish_release.sh").read_text(encoding="utf-8")
+        self.assertNotIn("MAX_API_BYTES", script)
+        self.assertNotRegex(script, r"wc -c .*release_(page_headers|headers|json)")
+        self.assertNotIn("seq 1 10", script)
+        self.assertNotRegex(script, r"kill [^\n]*\|\| true")
+        self.assertNotRegex(script, r"wait [^\n]*\|\| true")
+        self.assertIn("release publication child wait failed", script)
 
-    def test_publish_workflow_checks_tag_object_and_bounded_gh_calls(self) -> None:
+    def test_publish_workflow_checks_tag_object_and_preserves_gh_diagnostics(self) -> None:
         workflow = (Path(__file__).resolve().parent / "workflows" / "image.yml").read_text(encoding="utf-8")
         self.assertIn("Recheck the exact source tag and refreshed main immediately before image push", workflow)
         self.assertIn("rev-parse 'refs/remotes/origin/release-tag^{commit}'", workflow)
@@ -849,9 +871,9 @@ class PrepareInputsTests(unittest.TestCase):
         script = (Path(__file__).resolve().parent / "publish_release.sh").read_text(encoding="utf-8")
         self.assertIn("gh api --include", script)
         self.assertNotRegex(script, r"ulimit\s+-f")
-        self.assertIn("bounded-command.py", script)
-        self.assertIn("start_new_session=True", (Path(__file__).resolve().parent / "bounded-command.py").read_text(encoding="utf-8"))
-        self.assertEqual(workflow.count("NODE_OPTIONS: --no-deprecation"), 1)
+        self.assertIn("capture_command", script)
+        self.assertIn("timeout --signal=TERM --kill-after=5s", script)
+        self.assertNotIn("NODE_OPTIONS: --no-deprecation", workflow)
         self.assertIn("uses: actions/download-artifact@v8.0.1", workflow)
 
     def test_synapse_release_contract_checks_identity_and_asset_digest(self) -> None:
@@ -933,7 +955,7 @@ class PrepareInputsTests(unittest.TestCase):
             },
         }
         original = prepare_inputs.fetch_controlplane_api
-        prepare_inputs.fetch_controlplane_api = lambda endpoint, max_bytes: responses[endpoint]
+        prepare_inputs.fetch_controlplane_api = lambda endpoint: responses[endpoint]
         try:
             self.assertEqual(
                 prepare_inputs.fetch_controlplane_annotated_tag(RELEASE),

@@ -83,9 +83,17 @@ def main() -> None:
     if not required["RECORD_SIZE"].isdigit() or int(required["RECORD_SIZE"]) <= 0:
         fail("expected record size is not positive")
     try:
-        document = json.loads(args.release.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raw = args.release.read_bytes()
+    except OSError as exc:
         fail(f"release JSON is unreadable: {exc}")
+    try:
+        document = json.loads(raw)
+    except (UnicodeDecodeError, ValueError) as exc:
+        body = raw.decode("utf-8", errors="replace")
+        fail(
+            f"release JSON is unreadable: {type(exc).__name__}: {exc}"
+            f"\nresponse body:\n{body}"
+        )
     validate_release(
         document,
         tag=required["EXPECTED_TAG"],
