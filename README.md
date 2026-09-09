@@ -123,8 +123,9 @@ or clears the mount root.
 A published image is an available, tested artifact—not a deployment. To adopt one:
 
 1. create a reviewed immutable `server-state-*` release referencing its exact tag;
-2. verify the release through local Harness acceptance; and
-3. deploy that `server_state` release explicitly.
+2. verify the exact release identity and deploy that `server_state` release to stage;
+3. run private operator-local Harness acceptance against the deployed stage release; and
+4. promote the identical tested release only after acceptance passes and the owner instructs it.
 
 Never use `latest`, a floating Synapse tag, a bind-mounted Python module, or a runtime `pip install`.
 
