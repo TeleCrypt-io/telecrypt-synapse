@@ -422,6 +422,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      actions: read
     env:
       IMAGE_TAG: ${{ needs.versions.outputs.image_tag }}
       ARCHIVE_NAME: telecrypt-synapse-${{ needs.versions.outputs.image_tag }}.tar
@@ -429,11 +430,15 @@ jobs:
       EXPECTED_ARCHIVE_SIZE: ${{ needs.test.outputs.archive_size }}
     steps:
       - name: Download the tested image archive and checksum
-        uses: actions/download-artifact@v8.0.1
         timeout-minutes: 5
-        with:
-          name: telecrypt-synapse-image-${{ needs.versions.outputs.image_tag }}
-          path: ${{ runner.temp }}/telecrypt-synapse-image-artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "$GITHUB_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "telecrypt-synapse-image-${IMAGE_TAG}" \
+            --dir "$RUNNER_TEMP/telecrypt-synapse-image-artifact"
       - name: Checkout the exact workflow source for publication checks
         uses: actions/checkout@v7.0.1
         timeout-minutes: 5
