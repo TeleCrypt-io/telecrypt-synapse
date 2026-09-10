@@ -518,7 +518,8 @@ jobs:
             existing\ sha256:*)
               registry_digest="${classification#existing }"
               result="$(bash .github/verify_registry_image.sh "$IMAGE:$TAG" "$tested_image_id" "$registry_digest")"
-              registry_digest="${result#digest=}"
+              result_line="${result##*$'\n'}"
+              registry_digest="${result_line#digest=}"
               if [[ ! "$registry_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
                 echo "existing registry image did not return a sha256 digest: $IMAGE:$TAG" >&2
                 exit 1
@@ -645,7 +646,8 @@ jobs:
             exit 1
           fi
           result="$(bash .github/verify_registry_image.sh "$IMAGE:$TAG" "$tested_image_id" "$registry_manifest_digest")"
-          digest="${result#digest=}"
+          result_line="${result##*$'\n'}"
+          digest="${result_line#digest=}"
           printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
       - id: digest
         name: Select the exact published image digest
@@ -725,7 +727,8 @@ jobs:
         run: |
           set -euo pipefail
           result="$(bash .github/verify_registry_image.sh "$IMAGE:$TAG" "$EXPECTED_IMAGE_ID" "$EXPECTED_DIGEST")"
-          test "${result#digest=}" = "$EXPECTED_DIGEST"
+          result_line="${result##*$'\n'}"
+          test "$result_line" = "digest=$EXPECTED_DIGEST"
       - name: Prepare deterministic release digest record
         env:
           RECORD_PATH: ${{ runner.temp }}/telecrypt-synapse-${{ needs.versions.outputs.image_tag }}.digest.json
@@ -756,4 +759,5 @@ jobs:
         run: |
           set -euo pipefail
           result="$(bash .github/verify_registry_image.sh "$IMAGE:$TAG" "$EXPECTED_IMAGE_ID" "$EXPECTED_DIGEST")"
-          test "${result#digest=}" = "$EXPECTED_DIGEST"
+          result_line="${result##*$'\n'}"
+          test "$result_line" = "digest=$EXPECTED_DIGEST"

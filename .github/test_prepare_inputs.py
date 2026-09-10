@@ -959,6 +959,8 @@ class PrepareInputsTests(unittest.TestCase):
         self.assertIn('--name "telecrypt-synapse-image-${IMAGE_TAG}"', workflow)
         self.assertIn('--dir "$RUNNER_TEMP/telecrypt-synapse-image-artifact"', workflow)
         self.assertNotIn("actions/download-artifact@", workflow)
+        self.assertEqual(workflow.count('result_line="${result##*$\'\\n\'}"'), 4)
+        self.assertNotIn('${result#digest=}', workflow)
 
     def test_synapse_release_contract_checks_identity_and_asset_digest(self) -> None:
         digest = "sha256:" + "d" * 64
