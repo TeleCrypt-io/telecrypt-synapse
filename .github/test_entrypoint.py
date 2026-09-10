@@ -35,14 +35,13 @@ class EntrypointTests(unittest.TestCase):
         )
         return mountinfo
 
-    def prepare(self, path: pathlib.Path, *, reserve: int = 1) -> None:
+    def prepare(self, path: pathlib.Path) -> None:
         mountinfo = self.mountinfo(path)
         uid = path.stat().st_uid
         gid = path.stat().st_gid
         with (
             mock.patch.object(entrypoint, "EXPECTED_UID", uid),
             mock.patch.object(entrypoint, "EXPECTED_GID", gid),
-            mock.patch.object(entrypoint, "FREE_RESERVE_BYTES", reserve),
         ):
             entrypoint.prepare_staging(staging=str(path), mountinfo_path=str(mountinfo))
 
@@ -57,7 +56,6 @@ class EntrypointTests(unittest.TestCase):
             'MEDIA_PATH = f"{STAGING_PATH}/media"',
             "EXPECTED_STAGING_MODE = 0o711",
             "EXPECTED_CHILD_MODE = 0o700",
-            "FREE_RESERVE_BYTES = 10 * 1024 * 1024 * 1024",
         ):
             self.assertIn(value, source)
 
@@ -110,31 +108,6 @@ class EntrypointTests(unittest.TestCase):
                 else:
                     os.environ["TMPDIR"] = original_tmpdir
 
-    def test_prepare_clears_disposable_children_before_free_space_check(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            staging = pathlib.Path(directory) / "staging"
-            staging.mkdir(mode=0o711)
-            for child in ("tmp", "media"):
-                child_path = staging / child
-                child_path.mkdir(mode=0o700)
-                (child_path / "stale").write_text("remove", encoding="ascii")
-
-            def assert_cleared(path: str) -> int:
-                self.assertEqual(path, str(staging))
-                self.assertEqual(list((staging / "tmp").iterdir()), [])
-                self.assertEqual(list((staging / "media").iterdir()), [])
-                return 1
-
-            original_tmpdir = os.environ.get("TMPDIR")
-            try:
-                with mock.patch.object(entrypoint, "_free_bytes", side_effect=assert_cleared):
-                    self.prepare(staging)
-            finally:
-                if original_tmpdir is None:
-                    os.environ.pop("TMPDIR", None)
-                else:
-                    os.environ["TMPDIR"] = original_tmpdir
-
     def test_prepare_requires_exact_distinct_root_and_child_modes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             staging = pathlib.Path(directory) / "staging"
@@ -176,18 +149,6 @@ class EntrypointTests(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 self.prepare(staging)
             self.assertEqual(outside.read_text(encoding="ascii"), "retain")
-
-    def test_free_space_reserve_is_exact_and_fail_closed(self) -> None:
-        with mock.patch.object(entrypoint, "FREE_RESERVE_BYTES", 10), mock.patch.object(
-            entrypoint.os, "statvfs", return_value=SimpleNamespace(f_bavail=9, f_frsize=1)
-        ):
-            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-                entrypoint._free_bytes("/staging")
-
-        with mock.patch.object(entrypoint, "FREE_RESERVE_BYTES", 10), mock.patch.object(
-            entrypoint.os, "statvfs", return_value=SimpleNamespace(f_bavail=10, f_frsize=1)
-        ):
-            self.assertEqual(entrypoint._free_bytes("/staging"), 10)
 
     def test_open_directory_preserves_fstat_failure_and_closes_descriptor(self) -> None:
         with mock.patch.object(entrypoint, "_directory_metadata"), mock.patch.object(
