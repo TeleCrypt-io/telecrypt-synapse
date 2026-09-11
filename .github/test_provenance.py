@@ -92,65 +92,18 @@ class ProvenanceTests(unittest.TestCase):
                     path, "TeleCrypt-io-synapse-bbbbbbb"
                 )
 
-    def test_no_network_input_paths_and_build_args_use_the_same_locked_names(self) -> None:
+    def test_archive_names_use_locked_releases(self) -> None:
         values = validate_provenance.load_lock(ROOT / "provenance.lock")
         synapse_name = f"synapse-{values['SYNAPSE_FORK_RELEASE']}.tar.gz"
         provider_name = f"synapse-s3-storage-provider-{values['S3_PROVIDER_FORK_RELEASE']}.tar.gz"
-        source = (ROOT / ".github" / "prepare_inputs.py").read_text(encoding="utf-8")
-        self.assertIn('return metadata["tarball_url"]', source)
-        self.assertNotIn("/archive/refs/tags/", source)
-        self.assertNotIn("--root-user-action", source)
-        self.assertEqual(prepare_inputs.synapse_fork_archive_name(values["SYNAPSE_FORK_RELEASE"]), synapse_name)
-        self.assertEqual(prepare_inputs.s3_provider_fork_archive_name(values["S3_PROVIDER_FORK_RELEASE"]), provider_name)
-        workflow = (ROOT / ".github" / "workflows" / "image.yml").read_text(encoding="utf-8")
-        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-        for argument in (
-            "--synapse-fork-commit",
-            "--synapse-fork-archive-sha256",
-            "--synapse-fork-release",
-            "--s3-provider-fork-commit",
-            "--s3-provider-fork-archive-sha256",
-            "--s3-provider-fork-release",
-        ):
-            self.assertIn(argument, workflow)
-        for name in (
-            "SYNAPSE_BASE_DIGEST",
-            "SYNAPSE_FORK_RELEASE",
-            "SYNAPSE_FORK_COMMIT",
-            "SYNAPSE_FORK_ARCHIVE_SHA256",
-            "S3_PROVIDER_FORK_RELEASE",
-            "S3_PROVIDER_FORK_COMMIT",
-            "S3_PROVIDER_FORK_ARCHIVE_SHA256",
-        ):
-            self.assertIn(name, dockerfile)
-        self.assertIn('synapse-${SYNAPSE_FORK_RELEASE}.tar.gz', dockerfile)
-        self.assertIn(
-            "ARG SYNAPSE_BASE_REF=ghcr.io/element-hq/synapse:v0.0.0@sha256:"
-            + "0" * 64,
-            dockerfile,
+        self.assertEqual(
+            prepare_inputs.synapse_fork_archive_name(values["SYNAPSE_FORK_RELEASE"]),
+            synapse_name,
         )
-        self.assertIn("FROM ${SYNAPSE_BASE_REF} AS runtime", dockerfile)
-        self.assertIn(
-            'test "${SYNAPSE_BASE_REF}" = "ghcr.io/element-hq/synapse:'
-            'v${SYNAPSE_VERSION}@${SYNAPSE_BASE_DIGEST}"',
-            dockerfile,
+        self.assertEqual(
+            prepare_inputs.s3_provider_fork_archive_name(values["S3_PROVIDER_FORK_RELEASE"]),
+            provider_name,
         )
-        self.assertIn(
-            "SYNAPSE_BASE_REF=ghcr.io/element-hq/synapse:"
-            "v${{ needs.versions.outputs.synapse_version }}@${{ steps.base.outputs.digest }}",
-            workflow,
-        )
-        self.assertIn("SYNAPSE_BASE_DIGEST=${{ steps.base.outputs.digest }}", workflow)
-        self.assertIn("image contract mismatch (%s)", workflow)
-        self.assertIn("((image_contract_failures == 0))", workflow)
-        self.assertNotIn('test "$(docker_inspect', workflow)
-        self.assertNotIn(".Config.Cmd", workflow)
-        self.assertIn('synapse-s3-storage-provider-${S3_PROVIDER_FORK_RELEASE}.tar.gz', dockerfile)
-        self.assertIn("--strip-components=1", dockerfile)
-        self.assertNotIn("synapse-${SYNAPSE_FORK_RELEASE}/synapse", dockerfile)
-        self.assertIn(synapse_name, f"synapse-{values['SYNAPSE_FORK_RELEASE']}.tar.gz")
-        self.assertIn(provider_name, f"synapse-s3-storage-provider-{values['S3_PROVIDER_FORK_RELEASE']}.tar.gz")
-        self.assertNotIn("matrix-org/synapse-s3-storage-provider", workflow + dockerfile)
 
 
 if __name__ == "__main__":

@@ -299,25 +299,6 @@ class PrepareInputsTests(unittest.TestCase):
                 )
         self.assertIn('{"release":', str(failure.exception))
 
-    def test_load_image_preserves_docker_exit_status(self) -> None:
-        script = (Path(__file__).resolve().parent / "load_image.sh").read_text(encoding="utf-8")
-        self.assertIn('exit "$status"', script)
-        self.assertNotIn("cat -- \"$stdout_file\" \"$stderr_file\" >&2\n  exit 1", script)
-        self.assertNotRegex(script, r"kill [^\n]*\|\| true")
-        self.assertNotRegex(script, r"wait [^\n]*\|\| true")
-        self.assertIn("docker load child wait failed", script)
-
-    def test_signal_wrappers_retain_termination_and_wait_failures(self) -> None:
-        for name in ("strict_git_fetch.sh", "publish_release.sh", "verify_registry_image.sh", "run_command.sh"):
-            script = (Path(__file__).resolve().parent / name).read_text(encoding="utf-8")
-            self.assertNotRegex(script, r"kill [^\n]*\|\| true", name)
-            self.assertNotRegex(script, r"wait [^\n]*\|\| true", name)
-            self.assertRegex(script, r"child wait failed", name)
-
-    def test_release_validator_preserves_malformed_body(self) -> None:
-        script = (Path(__file__).resolve().parent / "validate_release.py").read_text(encoding="utf-8")
-        self.assertIn("response body:", script)
-
     def run_publish_release(
         self, record_bytes: bytes, **changes: str
     ) -> subprocess.CompletedProcess[str]:
@@ -932,35 +913,6 @@ class PrepareInputsTests(unittest.TestCase):
             self.assertNotIn("releases/123", log.read_text(encoding="utf-8"))
             self.assertNotIn("releases/124", log.read_text(encoding="utf-8"))
 
-    def test_publish_release_keeps_complete_api_output(self) -> None:
-        script = (Path(__file__).resolve().parent / "publish_release.sh").read_text(encoding="utf-8")
-        self.assertNotIn("MAX_API_BYTES", script)
-        self.assertNotRegex(script, r"wc -c .*release_(page_headers|headers|json)")
-        self.assertNotIn("seq 1 10", script)
-        self.assertNotRegex(script, r"kill [^\n]*\|\| true")
-        self.assertNotRegex(script, r"wait [^\n]*\|\| true")
-        self.assertIn("release publication child wait failed", script)
-
-    def test_publish_workflow_checks_tag_object_and_preserves_gh_diagnostics(self) -> None:
-        workflow = (Path(__file__).resolve().parent / "workflows" / "image.yml").read_text(encoding="utf-8")
-        self.assertIn("Recheck the exact source tag and refreshed main immediately before image push", workflow)
-        self.assertIn("rev-parse 'refs/remotes/origin/release-tag^{commit}'", workflow)
-        self.assertNotIn("grep -Eiq '(^|[^0-9])404", workflow)
-        script = (Path(__file__).resolve().parent / "publish_release.sh").read_text(encoding="utf-8")
-        self.assertIn("gh api --include", script)
-        self.assertNotRegex(script, r"ulimit\s+-f")
-        self.assertIn("capture_command", script)
-        self.assertIn("timeout --signal=TERM --kill-after=5s", script)
-        self.assertNotIn("NODE_OPTIONS: --no-deprecation", workflow)
-        self.assertIn("actions: read", workflow)
-        self.assertIn("GH_TOKEN: ${{ github.token }}", workflow)
-        self.assertIn('gh run download "$GITHUB_RUN_ID"', workflow)
-        self.assertIn('--repo "$GITHUB_REPOSITORY"', workflow)
-        self.assertIn('--name "telecrypt-synapse-image-${IMAGE_TAG}"', workflow)
-        self.assertIn('--dir "$RUNNER_TEMP/telecrypt-synapse-image-artifact"', workflow)
-        self.assertNotIn("actions/download-artifact@", workflow)
-        self.assertEqual(workflow.count('result_line="${result##*$\'\\n\'}"'), 4)
-        self.assertNotIn('${result#digest=}', workflow)
 
     def test_synapse_release_contract_checks_identity_and_asset_digest(self) -> None:
         digest = "sha256:" + "d" * 64

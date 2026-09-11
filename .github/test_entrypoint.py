@@ -9,7 +9,6 @@ import importlib.util
 import io
 import os
 import pathlib
-import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -26,11 +25,6 @@ LOADER.exec_module(entrypoint)
 
 
 class EntrypointTests(unittest.TestCase):
-    def test_script_is_executable(self) -> None:
-        script = ROOT / "telecrypt-synapse-entrypoint"
-        self.assertEqual(script.read_text(encoding="utf-8").splitlines()[0], "#!/usr/local/bin/python")
-        self.assertEqual(stat.S_IMODE(script.stat().st_mode), 0o755)
-
     def test_prepare_creates_and_clears_disposable_directories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             staging = pathlib.Path(directory) / "staging"

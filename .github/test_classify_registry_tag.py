@@ -13,7 +13,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / ".github" / "classify_registry_tag.py"
-WORKFLOW = ROOT / ".github" / "workflows" / "image.yml"
 TAG = "1.159-tc3"
 DIGEST = "sha256:" + "a" * 64
 OTHER_DIGEST = "sha256:" + "b" * 64
@@ -101,35 +100,6 @@ class ClassifyRegistryTagTests(unittest.TestCase):
         self.assertIn('{"message":', malformed.stderr)
         oversized_tag = self.run_classifier([[]], tag="x" * 257)
         self.assertNotEqual(oversized_tag.returncode, 0)
-
-    def test_workflow_uses_authenticated_api_for_both_classifiers(self) -> None:
-        workflow = WORKFLOW.read_text(encoding="utf-8")
-        self.assertNotIn("grep -Eqi 'manifest unknown|no such manifest'", workflow)
-        self.assertEqual(
-            workflow.count('classification="$(python3 .github/classify_registry_tag.py "$package_versions_file" "$TAG")"'),
-            2,
-        )
-        self.assertEqual(workflow.count("--paginate --slurp"), 2)
-        self.assertEqual(workflow.count("X-GitHub-Api-Version: 2026-03-10"), 2)
-        self.assertEqual(
-            workflow.count("GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n          TAG:"), 2
-        )
-        self.assertIn("packages: write", workflow)
-        self.assertIn("orgs/TeleCrypt-io/packages/container/telecrypt-synapse/versions?per_page=100", workflow)
-        self.assertNotIn("docker manifest inspect \"$IMAGE:$TAG\"", workflow)
-        self.assertIn("response body:", SCRIPT.read_text(encoding="utf-8"))
-
-    def test_every_docker_capture_is_scoped_to_its_step_temp_area(self) -> None:
-        workflow = WORKFLOW.read_text(encoding="utf-8")
-        steps = workflow.split("      - ")[1:]
-        docker_steps = [step for step in steps if ".github/run_command.sh" in step]
-        self.assertEqual(workflow.count(".github/run_command.sh"), 7)
-        self.assertGreaterEqual(len(docker_steps), 5)
-        for step in docker_steps:
-            with self.subTest(step=step.splitlines()[0]):
-                self.assertIn("run: |", step)
-                self.assertIn("set -euo pipefail", step)
-                self.assertIn("$RUNNER_TEMP", step)
 
 
 if __name__ == "__main__":

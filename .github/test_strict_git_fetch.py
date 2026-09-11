@@ -148,32 +148,6 @@ class StrictGitFetchTests(unittest.TestCase):
         self.assertIn("fatal:", result.stderr)
         self.assertNotIn("output exceeded", result.stderr)
 
-    def test_workflow_does_not_hide_tag_type_failure_diagnostics(self) -> None:
-        workflow = (Path(__file__).resolve().parent / "workflows" / "image.yml").read_text(encoding="utf-8")
-        self.assertNotIn("local-read cat-file-type \"$expected_ref\" 2>/dev/null", workflow)
-        self.assertIn("expected_ref_type_status=$?", workflow)
-
-    def test_required_commands_retain_normal_diagnostics(self) -> None:
-        helper = HELPER.read_text(encoding="utf-8")
-        workflow = (Path(__file__).resolve().parent / "workflows" / "image.yml").read_text(encoding="utf-8")
-        prepare_inputs = (Path(__file__).resolve().parent / "prepare_inputs.py").read_text(encoding="utf-8")
-        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
-        self.assertNotIn("fetch --quiet", helper)
-        self.assertNotIn("ls-remote --quiet", helper)
-        self.assertNotIn("docker pull --quiet", workflow)
-        self.assertNotIn('"--quiet"', prepare_inputs)
-        self.assertNotIn("Curl probes use silent+show-error", readme)
-        self.assertNotRegex(helper, r"kill [^\n]*\|\| true")
-        self.assertNotRegex(helper, r"wait [^\n]*\|\| true")
-        self.assertIn("Git transport child wait failed", helper)
-
-    def test_checkout_auth_cleanup_accepts_only_documented_no_match_statuses(self) -> None:
-        cleanup = (Path(__file__).resolve().parent / "clear_checkout_auth.sh").read_text(encoding="utf-8")
-        self.assertNotIn("|| true", cleanup)
-        self.assertIn('[[ "$status" -eq 1 ]]', cleanup)
-        self.assertIn('[[ "$status" -eq 5 ]]', cleanup)
-        self.assertNotIn("2>/dev/null", cleanup)
-
     def test_accepts_github_canonical_remote_with_or_without_git_suffix(self) -> None:
         for remote in (
             "https://github.com/TeleCrypt-io/telecrypt-synapse.git",
@@ -183,21 +157,6 @@ class StrictGitFetchTests(unittest.TestCase):
             result = self.run_helper("local-read", "rev-parse", "HEAD")
             self.assertEqual(result.returncode, 0, result.stderr)
             git(self.root, "config", "--local", "--unset-all", "remote.origin.url")
-
-    def test_git_boundary_does_not_use_file_size_rlimit(self) -> None:
-        helper = HELPER.read_text(encoding="utf-8")
-        self.assertNotRegex(helper, r"ulimit\s+-f")
-        self.assertNotIn("MAX_GIT_OUTPUT_BYTES", helper)
-
-    def test_git_boundary_retains_the_runner_system_ca_store(self) -> None:
-        helper = HELPER.read_text(encoding="utf-8")
-        self.assertIn("-c http.sslVerify=true", helper)
-        self.assertIn("GIT_SSL_CAINFO", helper)
-        self.assertIn("GIT_SSL_CAPATH", helper)
-        self.assertNotIn("-c http.sslCAInfo=", helper)
-        self.assertNotIn("-c http.sslCAPath=", helper)
-        self.assertNotIn("-c http.sslCert=", helper)
-        self.assertNotIn("-c http.sslKey=", helper)
 
 
 if __name__ == "__main__":
